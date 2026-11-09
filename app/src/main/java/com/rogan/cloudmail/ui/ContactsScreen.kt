@@ -183,7 +183,7 @@ fun ContactEditScreen(nav: NavHostController, id: Long) {
 }
 
 @Composable
-private fun Labeled(label: String, value: String, onChange: (String) -> Unit) {
+fun Labeled(label: String, value: String, onChange: (String) -> Unit) {
     Column {
         Text(label, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         TextField(value = value, onValueChange = onChange,

@@ -245,15 +245,19 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             text = { Text(if (lm.folder == "TRASH") "将彻底删除这封邮件，不可恢复。" else "删除后移入「已删除」，可稍后彻底删除或恢复。") },
             confirmButton = {
                 TextButton(onClick = {
-                    if (lm.folder == "TRASH") db.messages().deleteForever(lm.id)
-                    else { lm.folder = "TRASH"; db.messages().update(lm) }
-                    longPressTarget = null; reload()
+                    scope.launch {
+                        if (lm.folder == "TRASH") db.messages().deleteForever(lm.id)
+                        else db.messages().setFolder(lm.id, "TRASH")
+                        longPressTarget = null; reload()
+                    }
                 }) { Text("删除") }
             },
             dismissButton = {
                 TextButton(onClick = {
-                    if (lm.folder == "TRASH") { db.messages().setFolder(lm.id, "INBOX"); reload() }
-                    longPressTarget = null
+                    scope.launch {
+                        if (lm.folder == "TRASH") { db.messages().setFolder(lm.id, "INBOX"); reload() }
+                        longPressTarget = null
+                    }
                 }) { Text(if (lm.folder == "TRASH") "恢复邮件" else "取消") }
             }
         )

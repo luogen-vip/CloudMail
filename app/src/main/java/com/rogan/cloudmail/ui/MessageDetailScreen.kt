@@ -61,9 +61,11 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 actions = {
                     if (m != null) {
                         IconButton(onClick = {
-                            m.isStarred = !m.isStarred
-                            db.messages().setStar(m.id, m.isStarred)
-                            msg = m.copy()
+                            scope.launch {
+                                m.isStarred = !m.isStarred
+                                db.messages().setStar(m.id, m.isStarred)
+                                msg = m.copy()
+                            }
                         }) { Icon(if (m.isStarred) Icons.Default.Star else Icons.Default.StarBorder, "星标",
                             tint = if (m.isStarred) Color(0xFFFBC02D) else MaterialTheme.colorScheme.onSurface) }
                         IconButton(onClick = {
@@ -217,20 +219,24 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 confirmButton = {
                     TextButton(onClick = {
                         confirmDelete = false
-                        if (m.folder == "TRASH") {
-                            db.messages().deleteForever(m.id)
-                        } else {
-                            m.folder = "TRASH"; db.messages().update(m)
+                        scope.launch {
+                            if (m.folder == "TRASH") {
+                                db.messages().deleteForever(m.id)
+                            } else {
+                                db.messages().setFolder(m.id, "TRASH")
+                            }
+                            nav.popBackStack()
                         }
-                        nav.popBackStack()
                     }) { Text(if (m.folder == "TRASH") "彻底删除" else "删除") }
                 },
                 dismissButton = {
                     TextButton(onClick = {
                         confirmDelete = false
-                        if (m.folder == "TRASH") {
-                            db.messages().setFolder(m.id, "INBOX")
-                            toast = "已恢复到收件箱"
+                        scope.launch {
+                            if (m.folder == "TRASH") {
+                                db.messages().setFolder(m.id, "INBOX")
+                                toast = "已恢复到收件箱"
+                            }
                         }
                     }) { Text(if (m.folder == "TRASH") "恢复邮件" else "取消") }
                 }
@@ -251,7 +257,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             }
                             toast = r.second
                             if (r.first || r.second.contains("已从")) {
-                                m.folder = "TRASH"; db.messages().update(m)
+                                db.messages().setFolder(m.id, "TRASH")
                             }
                         }
                     }) { Text("确认撤回") }

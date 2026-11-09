@@ -32,7 +32,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         return Result.success()
     }
 
-    private fun notifyNew(ctx: Context, accId: Long, m: MailMessage) {
+    private suspend fun notifyNew(ctx: Context, accId: Long, m: MailMessage) {
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED && android.os.Build.VERSION.SDK_INT >= 33) return
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

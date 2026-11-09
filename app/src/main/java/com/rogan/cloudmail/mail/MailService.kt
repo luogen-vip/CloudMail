@@ -3,13 +3,14 @@ package com.rogan.cloudmail.mail
 import android.content.Context
 import com.rogan.cloudmail.data.*
 import java.util.*
+import javax.mail.BodyPart
 import javax.mail.Flags
 import javax.mail.Folder
 import javax.mail.Message
+import javax.mail.Part
 import javax.mail.Session
 import javax.mail.Store
 import javax.mail.Transport
-import javax.mail.Part as JM
 import javax.mail.internet.*
 
 object MailService {
@@ -62,7 +63,7 @@ object MailService {
     /* ---------- 收件同步 ---------- */
 
     /** 同步单个账号，返回新收到的邮件(用于通知) */
-    fun syncAccount(ctx: Context, acc: Account, db: AppDatabase): List<MailMessage> {
+    suspend fun syncAccount(ctx: Context, acc: Account, db: AppDatabase): List<MailMessage> {
         val newInbox = mutableListOf<MailMessage>()
         connectImap(acc).use { store ->
             val inbox = store.getFolder("INBOX")
@@ -110,7 +111,7 @@ object MailService {
             messageId = runCatching { m.getHeader("Message-ID")?.firstOrNull() ?: "" }.getOrDefault(""),
             subject = subject,
             fromAddr = from?.address ?: "", fromName = from?.personal ?: from?.address ?: "",
-            toAddr = to, ccAddr = cc, date = date,
+            toAddr = to ?: "", ccAddr = cc ?: "", date = date,
             bodyHtml = "", snippet = subject,
             isRead = runCatching { m.isSet(Flags.Flag.SEEN) }.getOrDefault(false),
             isStarred = false, isAd = ad, hasAttachments = false,
@@ -121,7 +122,7 @@ object MailService {
     /* ---------- 正文与附件 ---------- */
 
     /** 拉取完整正文+附件到本地，返回更新后的实体 */
-    fun loadFull(ctx: Context, acc: Account, msg: MailMessage, db: AppDatabase): MailMessage {
+    suspend fun loadFull(ctx: Context, acc: Account, msg: MailMessage, db: AppDatabase): MailMessage {
         if (msg.loaded) return msg
         connectImap(acc).use { store ->
             val f = store.getFolder(if (msg.folder == "SENT") "Sent" else "INBOX")
@@ -150,7 +151,7 @@ object MailService {
     private fun fileStore(ctx: Context, msgId: Long) =
         java.io.File(ctx.filesDir, "att/$msgId").apply { mkdirs() }
 
-    private fun extractBody(ctx: Context, part: JM.Part, msgId: Long, atts: MutableList<AttInfo>): String {
+    private fun extractBody(ctx: Context, part: Part, msgId: Long, atts: MutableList<AttInfo>): String {
         return try {
             if (part.isMimeType("multipart/*")) {
                 val mp = part.content as javax.mail.Multipart
@@ -186,13 +187,13 @@ object MailService {
         } catch (e: Exception) { "" }
     }
 
-    private fun collectAttachment(ctx: Context, p: JM.BodyPart, msgId: Long, atts: MutableList<AttInfo>) {
+    private fun collectAttachment(ctx: Context, p: BodyPart, msgId: Long, atts: MutableList<AttInfo>) {
         runCatching {
             val disp = p.disposition
             val cid = runCatching { p.contentID?.trim('\"', '<', '>') ?: "" }.getOrDefault("")
             val fileName = javax.mail.internet.MimeUtility.decodeText(p.fileName ?: "附件")
             if (disp == null && cid.isEmpty()) return
-            if (disp != null && disp.equals(javax.mail.Multipart.INLINE, true) && fileName.isEmpty() && cid.isEmpty()) return
+            if (disp != null && disp.equals(Part.INLINE, true) && fileName.isEmpty() && cid.isEmpty()) return
             val dir = fileStore(ctx, msgId)
             val safe = fileName.replace(Regex("[/\\\\:*?\"<>|]"), "_").ifBlank { "file_${atts.size}" }
             val out = java.io.File(dir, "${atts.size}_$safe")
@@ -249,7 +250,7 @@ object MailService {
             bp.fileName = MimeUtility.encodeText(a.name)
             if (a.isInline && a.cid.isNotBlank()) {
                 bp.contentID = "<${a.cid}>"
-                bp.disposition = javax.mail.Multipart.INLINE
+                bp.disposition = Part.INLINE
             }
             container.addBodyPart(bp)
         }
@@ -342,4 +343,3 @@ object MailService {
 }
 
 private typealias UIDFolder = com.sun.mail.imap.IMAPFolder
-private typealias Flags = javax.mail.Flags

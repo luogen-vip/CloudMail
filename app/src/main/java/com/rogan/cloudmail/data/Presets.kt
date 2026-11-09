@@ -1,5 +1,8 @@
 package com.rogan.cloudmail.data
 
+import org.json.JSONArray
+import org.json.JSONObject
+
 /* 常用邮箱服务商预设。用户也可完全自定义服务器。 */
 data class ProviderPreset(
     val name: String,
@@ -59,14 +62,14 @@ data class VCard(
     val address: String = "",
     val note: String = ""
 ) {
-    fun toJson(): String = org.json.JSONObject().apply {
+    fun toJson(): String = JSONObject().apply {
         put("name", name); put("phone", phone); put("org", org)
         put("title", title); put("address", address); put("note", note)
     }.toString()
 
     companion object {
         fun fromJson(s: String): VCard = runCatching {
-            val o = org.json.JSONObject(s.ifBlank { "{}" })
+            val o = JSONObject(s.ifBlank { "{}" })
             VCard(o.optString("name"), o.optString("phone"), o.optString("org"),
                 o.optString("title"), o.optString("address"), o.optString("note"))
         }.getOrDefault(VCard())
@@ -81,14 +84,14 @@ data class AttInfo(
     val isInline: Boolean,
     val cid: String
 ) {
-    fun toJson(): String = org.json.JSONObject().apply {
+    fun toJson(): String = JSONObject().apply {
         put("name", name); put("path", path); put("mime", mime)
         put("inline", isInline); put("cid", cid)
     }.toString()
 
     companion object {
         fun fromJson(s: String): List<AttInfo> = runCatching {
-            val arr = org.json.JSONArray(s.ifBlank { "[]" })
+            val arr = JSONArray(s.ifBlank { "[]" })
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
                 AttInfo(o.optString("name"), o.optString("path"), o.optString("mime"),
