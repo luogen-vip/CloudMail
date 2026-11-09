@@ -19,8 +19,9 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             return Result.failure()
         }
 
-        // 发送中状态(仅本地数据库状态；不再发"正在发送"系统通知，避免打扰)
+        // 发送中状态：本地数据库 + 系统通知栏真实显示「正在发送…」(发送成功/失败后自动被替换)
         db.outbox().update(item.copy(status = "SENDING", error = "", updatedAt = System.currentTimeMillis()))
+        AppNotify.sending(applicationContext, item.subject)
 
         return try {
             val atts = AttInfo.fromJson(item.attachmentsJson).toMutableList()
@@ -58,6 +59,8 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             ))
             db.outbox().delete(itemId)
             AppNotify.sendOk(applicationContext, item.subject)
+            // 发送成功后立即拉取服务器最新邮件，保证列表马上可见(不等通知)
+            runCatching { SyncWorker.syncAllNow(applicationContext) }
             Result.success()
         } catch (e: Exception) {
             // 真实失败原因(分类为可读中文)
