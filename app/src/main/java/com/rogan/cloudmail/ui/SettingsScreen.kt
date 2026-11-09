@@ -85,7 +85,7 @@ fun SettingsScreen(nav: NavHostController) {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text("关于云邮", fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Text("版本 1.2.0", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("版本 1.2.1", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("作者：罗根", fontSize = 15.sp, fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary)
                     Text("一款支持多账号、多服务商的真实邮箱客户端", fontSize = 12.sp,
@@ -97,7 +97,7 @@ fun SettingsScreen(nav: NavHostController) {
     }
 }
 
-/* ============ 全局搜索 ============ */
+/* ============ 全局搜索(输入即实时显示结果) ============ */
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -110,69 +110,74 @@ fun SearchScreen(nav: NavHostController) {
     var contacts by remember { mutableStateOf<List<Contact>>(emptyList()) }
     var searched by remember { mutableStateOf(false) }
 
+    // 实时搜索：输入变化后 300ms 自动搜索，无需手动点击
+    LaunchedEffect(q) {
+        val kw = q.trim()
+        if (kw.isBlank()) { msgs = emptyList(); contacts = emptyList(); searched = false; return@LaunchedEffect }
+        kotlinx.coroutines.delay(300)
+        msgs = db.messages().search(kw)
+        contacts = db.contacts().search(kw)
+        searched = true
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    TextField(value = q, onValueChange = { q = it },
-                        placeholder = { Text("搜索邮件、主题、内容、联系人…") },
-                        singleLine = true, modifier = Modifier.fillMaxWidth())
-                },
-                navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } },
-                actions = {
-                    TextButton(onClick = {
-                        if (q.isBlank()) return@TextButton
-                        scope.launch {
-                            msgs = db.messages().search(q)
-                            contacts = db.contacts().search(q)
-                            searched = true
-                        }
-                    }) { Text("搜索") }
-                }
+                title = { Text("搜索", fontSize = 18.sp) },
+                navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } }
             )
         }
     ) { pad ->
-        LazyColumn(Modifier.padding(pad).fillMaxSize()) {
-            if (contacts.isNotEmpty()) {
-                item { Text("联系人", fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(16.dp)) }
-                items(contacts, key = { "c${it.id}" }) { c ->
-                    ListItem(
-                        headlineContent = { Text(c.remark.ifBlank { c.email }) },
-                        supportingContent = { Text(c.email) },
-                        leadingContent = { AvatarOf(c.remark.ifBlank { c.email }, null, 36.dp) },
-                        trailingContent = { TextButton(onClick = { nav.navigate("composeTo/${c.email}") }) { Text("发信") } },
-                        modifier = Modifier.clickable { nav.navigate("contactEdit/${c.id}") }
-                    )
+        Column(Modifier.padding(pad).fillMaxSize()) {
+            // 搜索框独立放在标题栏下方，高度固定，不再被遮挡
+            TextField(value = q, onValueChange = { q = it },
+                placeholder = { Text("输入即实时搜索：邮件主题/内容/联系人…", fontSize = 14.sp) },
+                singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                trailingIcon = {
+                    if (q.isNotBlank()) IconButton(onClick = { q = "" }) { Icon(Icons.Default.Close, "清空") }
+                })
+            LazyColumn(Modifier.fillMaxSize()) {
+                if (contacts.isNotEmpty()) {
+                    item { Text("联系人 (${contacts.size})", fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(16.dp)) }
+                    items(contacts, key = { "c${it.id}" }) { c ->
+                        ListItem(
+                            headlineContent = { Text(c.remark.ifBlank { c.email }) },
+                            supportingContent = { Text(c.email) },
+                            leadingContent = { AvatarOf(c.remark.ifBlank { c.email }, null, 36.dp) },
+                            trailingContent = { TextButton(onClick = { nav.navigate("composeTo/${c.email}") }) { Text("发信") } },
+                            modifier = Modifier.clickable { nav.navigate("contactEdit/${c.id}") }
+                        )
+                    }
+                    item { HorizontalDivider() }
                 }
-                item { HorizontalDivider() }
-            }
-            if (msgs.isNotEmpty()) {
-                item { Text("邮件", fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(16.dp)) }
-                items(msgs, key = { "m${it.id}" }) { m ->
-                    ListItem(
-                        headlineContent = { Text(m.subject.ifBlank { "(无主题)" }) },
-                        supportingContent = { Text("${if (m.folder == "SENT") "发送至 " else m.fromAddr} · ${fmtTime(m.date)}") },
-                        leadingContent = {
-                            Icon(if (m.folder == "SENT") Icons.Default.Send else Icons.Default.Email, null,
-                                tint = MaterialTheme.colorScheme.primary)
-                        },
-                        modifier = Modifier.clickable { nav.navigate("detail/${m.id}") }
-                    )
-                }
-            }
-            if (searched && msgs.isEmpty() && contacts.isEmpty()) {
-                item {
-                    Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("没有匹配的结果", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (msgs.isNotEmpty()) {
+                    item { Text("邮件 (${msgs.size})", fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(16.dp)) }
+                    items(msgs, key = { "m${it.id}" }) { m ->
+                        ListItem(
+                            headlineContent = { Text(m.subject.ifBlank { "(无主题)" }) },
+                            supportingContent = { Text("${if (m.folder == "SENT") "发送至 " else m.fromAddr} · ${fmtTime(m.date)}") },
+                            leadingContent = {
+                                Icon(if (m.folder == "SENT") Icons.Default.Send else Icons.Default.Email, null,
+                                    tint = MaterialTheme.colorScheme.primary)
+                            },
+                            modifier = Modifier.clickable { nav.navigate("detail/${m.id}") }
+                        )
                     }
                 }
-            }
-            if (!searched) {
-                item {
-                    Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("输入关键词搜索邮件和联系人", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (searched && msgs.isEmpty() && contacts.isEmpty()) {
+                    item {
+                        Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("没有匹配的结果", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+                if (!searched) {
+                    item {
+                        Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("输入内容即可实时显示相关邮件与联系人", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 }
             }
