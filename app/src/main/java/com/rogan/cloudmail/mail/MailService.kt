@@ -139,24 +139,66 @@ object MailService {
 
     /* ---------- 收件同步 ---------- */
 
-    /** 同步单个账号，返回新收到的邮件(用于通知) */
+    // IMAP 长连接复用(email -> Store)：避免每轮同步都重建 SSL+登录(每次要好几秒，收新邮件动辄20多秒)。
+    // 连接保持不断，每秒轮询只做一次轻量增量检查，新邮件 1~3 秒即可到达列表。
+    private val storeCache = java.util.concurrent.ConcurrentHashMap<String, Store>()
+    // 每个账号已拉取过的最大 UID：下一轮只拉这个 UID 之后的新邮件(增量同步)
+    private val lastSeenUid = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    // 已发送文件夹改为低频扫描(每 30 轮一次)，不拖慢高频收信检查
+    private val sentScanCounter = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    private fun getStore(acc: Account): Store {
+        val c = storeCache[acc.email]
+        if (c != null && runCatching { c.isConnected }.getOrDefault(false)) return c
+        runCatching { c?.close() }
+        val s = connectImap(acc)
+        storeCache[acc.email] = s
+        return s
+    }
+
+    /** 同步单个账号，返回新收到的邮件(用于通知)。连接复用+增量 UID，速度极快 */
     suspend fun syncAccount(ctx: Context, acc: Account, db: AppDatabase): List<MailMessage> {
         val newInbox = mutableListOf<MailMessage>()
-        connectImap(acc).use { store ->
-            val inbox = store.getFolder("INBOX")
-            inbox.open(Folder.READ_ONLY)
-            val msgs = inbox.messages
-            for (m in msgs.toList().takeLast(50)) {
+        val store = getStore(acc)
+        val inbox = store.getFolder("INBOX")
+        if (!inbox.isOpen) inbox.open(Folder.READ_ONLY)
+        val uidFolder = inbox as UIDFolder
+        val seen = lastSeenUid[acc.email]
+        if (seen == null) {
+            // 首次(每次启动后第一轮)：扫描最近 50 封建立基线，同时把库里缺的补进来
+            var maxUid = 0L
+            for (m in inbox.messages.toList().takeLast(50)) {
                 if (m.isExpunged) continue
-                val uid = (inbox as UIDFolder).getUID(m).toString()
-                if (db.messages().byUid(acc.id, "INBOX", uid) != null) continue
-                val ent = toEntity(acc.id, "INBOX", uid, m, ctx)
+                val uid = uidFolder.getUID(m)
+                if (uid > maxUid) maxUid = uid
+                if (db.messages().byUid(acc.id, "INBOX", uid.toString()) != null) continue
+                val ent = toEntity(acc.id, "INBOX", uid.toString(), m, ctx)
                 db.messages().insert(ent)
-                newInbox.add(ent)
+                if (!ent.isRead) newInbox.add(ent)
             }
-            inbox.close(false)
+            lastSeenUid[acc.email] = maxUid
+        } else {
+            // 之后每一轮：只拉基线 UID 之后的新邮件(通常 0 封，一次轻量查询，亚秒级完成)
+            val fresh = runCatching { uidFolder.getMessagesByUID(seen + 1, UIDFolder.LASTUID) }.getOrNull()
+            var maxUid = seen
+            if (fresh != null) for (m in fresh) {
+                if (m == null || m.isExpunged) continue
+                val uid = uidFolder.getUID(m)
+                if (uid <= seen) continue
+                if (db.messages().byUid(acc.id, "INBOX", uid.toString()) != null) continue
+                val ent = toEntity(acc.id, "INBOX", uid.toString(), m, ctx)
+                db.messages().insert(ent)
+                if (!ent.isRead) newInbox.add(ent)
+                if (uid > maxUid) maxUid = uid
+            }
+            lastSeenUid[acc.email] = maxUid
+        }
+        runCatching { if (inbox.isOpen) inbox.close(false) }
 
-            // 同步服务器上已有的已发送邮件
+        // 同步服务器上已有的已发送邮件：低频(每 30 轮一次)，收信检查保持最快
+        val n = (sentScanCounter[acc.email] ?: 0) + 1
+        if (n >= 30) {
+            sentScanCounter[acc.email] = 0
             runCatching {
                 val sent = sentFolder(store)
                 if (sent != null) {
@@ -170,7 +212,7 @@ object MailService {
                     sent.close(false)
                 }
             }
-        }
+        } else sentScanCounter[acc.email] = n
         return newInbox
     }
 
