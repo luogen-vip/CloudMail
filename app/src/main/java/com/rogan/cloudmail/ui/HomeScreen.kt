@@ -219,6 +219,15 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
         initialSyncDone = true
     }
 
+    // 待发送条数实时轮询(每 2 秒)：发送成功后顶部“待发送邮件 N 封”横条立即消失，
+    // 不再等下一次同步/切页面才更新
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(2000)
+            runCatching { outboxCount = kotlinx.coroutines.withContext(Dispatchers.IO) { db.outbox().all().size } }
+        }
+    }
+
     // 回到前台/进入主页时自动同步(8秒节流)，保证新邮件马上可见
     val life = androidx.compose.ui.platform.LocalLifecycleOwner.current
     DisposableEffect(life) {
@@ -382,6 +391,11 @@ private fun folderTitle(f: String) = when {
 
 /* ================== 邮件列表(支持多选删除/排序/计数) ================== */
 
+// 列表内存缓存：从详情页返回时 MessageList 会整体重建，若无缓存那一瞬间列表为空(显示加载转圈)，
+// 用户此刻的第一次滑动会落空——正是“返回后立刻滑动顿一下没反应”的根因。
+// 有缓存时返回瞬间立即渲染原列表，滑动无缝衔接；后台轮询继续保证数据实时
+private val msgListCache = mutableMapOf<String, List<MailMessage>>()
+
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Unit,
@@ -389,9 +403,9 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                 syncingEmpty: Boolean = false) {
     val ctx = LocalContext.current
     val db = AppDatabase.get(ctx)
-    var msgs by remember(folder) { mutableStateOf<List<MailMessage>>(emptyList()) }
-    // 首次加载数据库完成前显示加载状态，避免闪烁“暂无邮件”误导用户
-    var firstLoad by remember(folder) { mutableStateOf(true) }
+    var msgs by remember(folder) { mutableStateOf(msgListCache[folder] ?: emptyList()) }
+    // 首次加载数据库完成前显示加载状态，避免闪烁“暂无邮件”误导用户；有缓存则认为已加载
+    var firstLoad by remember(folder) { mutableStateOf(msgListCache[folder] == null) }
     val scope = rememberCoroutineScope()
     suspend fun loadList(): List<MailMessage> = kotlinx.coroutines.withContext(Dispatchers.IO) {
         val rows = when {
@@ -410,29 +424,37 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             else -> rows.sortedByDescending { it.date }
         }
     }
-    // 供删除/标已读等操作后局部刷新列表(保持当前浏览位置，不强行回顶)
-    val reload = { scope.launch { msgs = loadList() }; Unit }
-
     // 关键修复：加载数据和回顶放在同一个协程里顺序执行。
     // reloadKey(后台同步/操作后刷新)不回顶，避免正在浏览时被强行拉回顶部；
     // 换文件夹/点排序/新邮件到达才回顶
+    fun applyList(n: List<MailMessage>) { msgListCache[folder] = n; msgs = n; firstLoad = false }
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(folder, reloadKey) {
-        msgs = loadList()
-        firstLoad = false
-    }
+    LaunchedEffect(folder, reloadKey) { applyList(loadList()) }
     LaunchedEffect(folder, sortMode, sortNonce, scrollNonce) {
-        msgs = loadList()
-        firstLoad = false
+        applyList(loadList())
         listState.scrollToItem(0)
     }
-    val life = androidx.compose.ui.platform.LocalLifecycleOwner.current
-    DisposableEffect(life, folder) {
-        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
-            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) reload()
+    // 实时轮询数据库(每 0.8 秒，IO 线程，纯本地查询开销极小)：同步入库/已读状态变化后，
+    // 当前文件夹(包括正在浏览的“全部邮件”)自动更新，不再出现“未读文件夹有邮件、全部文件夹还空着”的错位；
+    // 数据没变化时不赋值，不触发多余重组
+    LaunchedEffect(folder) {
+        while (true) {
+            kotlinx.coroutines.delay(800)
+            runCatching { val n = loadList(); if (n != msgs) applyList(n) }
         }
-        life.lifecycle.addObserver(obs)
-        onDispose { life.lifecycle.removeObserver(obs) }
+    }
+    // 供删除/标已读等操作后局部刷新列表(保持当前浏览位置，不强行回顶)
+    val reload = { scope.launch { applyList(loadList()) }; Unit }
+
+    // 联系人备注整表一次查询(不再每行各查一次库)：返回列表重建时多行同时发查询会导致
+    // 多次重组集中爆发，正是“返回后第一下滑动没反应”的推手之一
+    var contactMap by remember { mutableStateOf<Map<String, Contact>>(emptyMap()) }
+    LaunchedEffect(Unit) {
+        runCatching {
+            contactMap = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                db.contacts().all().associateBy { it.email }
+            }
+        }
     }
 
     // 多选模式
@@ -534,9 +556,7 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             }
             LazyColumn(state = listState) {
                 items(msgs, key = { it.id }) { m ->
-                    val contact = remember(m.id) { mutableStateOf<Contact?>(null) }
-                    LaunchedEffect(m.fromAddr) { contact.value = db.contacts().byEmail(m.fromAddr) }
-                    val shownName = contact.value?.remark?.takeIf { it.isNotBlank() } ?: m.fromName.ifBlank { m.fromAddr }
+                    val shownName = contactMap[m.fromAddr]?.remark?.takeIf { it.isNotBlank() } ?: m.fromName.ifBlank { m.fromAddr }
                     val isSel = m.id in selected
                     Row(Modifier.fillMaxWidth().background(if (isSel) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)) {
                         if (selectionMode) {
@@ -626,6 +646,14 @@ fun OutboxList(nav: NavHostController, refreshParent: () -> Unit) {
         Unit
     }
     LaunchedEffect(Unit) { items = db.outbox().all() }
+    // 实时轮询(每 1 秒)：发送成功(SendWorker 改库)后页面立即把“正在发送”变成真实状态，
+    // 不再需要返回重进才能看到最新状态
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            runCatching { val n = kotlinx.coroutines.withContext(Dispatchers.IO) { db.outbox().all() }; if (n != items) items = n }
+        }
+    }
     val life = androidx.compose.ui.platform.LocalLifecycleOwner.current
     DisposableEffect(life) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
