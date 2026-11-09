@@ -231,9 +231,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     // - 手动输入的收件人/主题/正文/附件/录音仍保留着：提醒(防误丢内容)
     val shouldAskSave = userEdited && hasManualContent
 
-    fun saveDraftNow(): Long = kotlinx.coroutines.runBlocking {
-        if (!loadedDraft || !hasContent) return@runBlocking -1L
-        try {
+    // 改为 suspend：不再 runBlocking 卡主线程。之前自动保存草稿用 runBlocking 在主线程同步写库，
+    // 停止输入 1.5 秒后主线程被卡住，此时点发送/滑动列表都会没反应(点击被吞)，这是“点发送没反应/滑动顿一下”的根因
+    suspend fun saveDraftNow(): Long {
+        if (!loadedDraft || !hasContent) return -1L
+        return try {
             val bodyHtml = blocksToHtml()
             val effId = if (draftId > 0) draftId else autosaveDraftId
             val existing = if (effId > 0) db.outbox().byId(effId) else null
@@ -292,7 +294,9 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     DisposableEffect(Unit) {
         onDispose {
             // 只有用户手动输入过内容才自动存草稿；从联系人/转发自动带入的内容不算，返回时不误存也不误弹
-            if (!savedOnExit && loadedDraft && userEdited && hasManualContent && sendAccId > 0) saveDraftNow()
+            // onDispose 无协程上下文，仅此一次性退出场景用 runBlocking 兑底(快照写库，耗时极短)
+            if (!savedOnExit && loadedDraft && userEdited && hasManualContent && sendAccId > 0)
+                kotlinx.coroutines.runBlocking { runCatching { saveDraftNow() } }
             runCatching { player?.release() }
         }
     }
@@ -567,7 +571,10 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 180.dp)
                             .onFocusChanged { if (it.isFocused) focusBlockId = b.id },
                         colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
+                            focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
+                            // 底部指示线透明：多块正文(草稿中的图片/链接)之间不再显示一条横线，视觉上就是一个连续的正文区
+                            focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
+                            disabledIndicatorColor = Color.Transparent))
                     is BodyBlock.Img -> Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                         AsyncImage(model = File(b.att.path), contentDescription = b.att.name,
                             modifier = Modifier.fillMaxWidth().clickable { editImg = b },
@@ -765,10 +772,25 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             !u.startsWith("http") -> linkErr = "链接地址无效：必须以 http:// 或 https:// 开头"
                             !okUrl -> linkErr = "链接地址无效：请输入可访问的网址(如 https://www.example.com)"
                             else -> {
-                                insertIntoBody(BodyBlock.Lk(nextBlockId(), lt.text.trim(), u))
+                                // 以 Markdown 形式直接插入到光标处所在文本块内(发送时真实转成 <a> 链接)：
+                                // 不再拆出一个单独的链接块和新的正文块，正文保持一个连续输入区，不会多出一条横线
+                                val md = "[${lt.text.trim()}]($u)"
+                                val idx = blocks.indexOfFirst { it.id == focusBlockId && it is BodyBlock.T }
+                                if (idx >= 0) {
+                                    val t = blocks[idx] as BodyBlock.T
+                                    val pos = t.tv.selection.end.coerceIn(0, t.tv.text.length)
+                                    val nt = t.tv.text.substring(0, pos) + md + t.tv.text.substring(pos)
+                                    blocks[idx] = BodyBlock.T(t.id, TextFieldValue(nt, androidx.compose.ui.text.TextRange(pos + md.length)))
+                                } else {
+                                    val li = blocks.indexOfLast { it is BodyBlock.T }
+                                    if (li >= 0) {
+                                        val t = blocks[li] as BodyBlock.T
+                                        blocks[li] = BodyBlock.T(t.id, TextFieldValue(t.tv.text + md))
+                                    } else blocks.add(BodyBlock.T(nextBlockId(), TextFieldValue(md)))
+                                }
                                 userEdited = true
                                 showLink = false
-                                toast = "链接已插入正文光标处，显示为蓝色高亮，点击可编辑或删除"
+                                toast = "链接已插入到光标处(显示为蓝色高亮)"
                             }
                         }
                     }) { Text("插入到光标位置") }
@@ -788,6 +810,10 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 val max = when (m) { 1,3,5,7,8,10,12 -> 31; 4,6,9,11 -> 30; else -> 29 }
                 return d in 1..max
             }
+            // 每秒刷新一次当前时间：之前只在校验输入变化时重算，"21:09 整分被认为早于当前 21:09:xx"
+            // 且调整后提示不消失、确定按钮一直灰着；现在每秒重算 + 30 秒宽限，同一分钟内也能确定
+            var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
+            LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1000); nowTick = System.currentTimeMillis() } }
             val target: Long = run {
                 val c = Calendar.getInstance()
                 c.set(yr, mo - 1, dy, hh, mi, 0)
@@ -795,28 +821,32 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 c.timeInMillis
             }
             val invalid = !validDate(mo, dy)
-            val inPast = target <= System.currentTimeMillis()
+            val inPast = target < nowTick - 30_000
             AlertDialog(
                 onDismissRequest = { showSchedule = false },
                 title = { Text("定时发送") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("目标时间：${fmtFull(target)}", fontSize = 14.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                        // 年份可调：默认当前年(如 2026)，之前固定在当前年后导致选过去日期被自动+1 年显示成 2027
                         Stepper("年份", yr, cal.get(Calendar.YEAR), maxYear) { yr = it }
                         Stepper("月份", mo, 1, 12) { mo = it }
                         Stepper("日期", dy, 1, 31) { dy = it }
                         if (invalid) Text("$mo 月没有 $dy 日，请修改", fontSize = 12.sp, color = Color(0xFFEF6C00))
                         Stepper("小时", hh, 0, 23) { hh = it }
                         Stepper("分钟", mi, 0, 59) { mi = it }
-                        if (!invalid && inPast) Text("所选时间早于当前时间，请重选(可选今天稍晚/明天/后天等)",
+                        if (!invalid && inPast) Text("所选时间早于当前时间超过 1 分钟，请重选(可选今天稍晚/明天/后天等)",
                             fontSize = 12.sp, color = Color(0xFFEF6C00))
                         Text("到点自动真实发送；APP 不打开(被清理后台)也会生效", fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 },
                 confirmButton = {
-                    TextButton(enabled = !invalid && !inPast, onClick = { showSchedule = false; doSend(target) }) { Text("确定定时发送") }
+                    TextButton(enabled = !invalid && !inPast, onClick = {
+                        showSchedule = false
+                        // 若所选时间已过(含宽限内的同分钟)，到点改为 1 分钟后发送，保证一定能发出
+                        val t = if (target <= System.currentTimeMillis()) System.currentTimeMillis() + 60_000 else target
+                        doSend(t)
+                    }) { Text("确定定时发送") }
                 },
                 dismissButton = { TextButton(onClick = { showSchedule = false }) { Text("取消") } }
             )
