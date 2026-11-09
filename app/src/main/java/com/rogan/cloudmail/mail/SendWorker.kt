@@ -19,9 +19,8 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             return Result.failure()
         }
 
-        // 发送中状态(通知栏可见)
+        // 发送中状态(仅本地数据库状态；不再发"正在发送"系统通知，避免打扰)
         db.outbox().update(item.copy(status = "SENDING", error = "", updatedAt = System.currentTimeMillis()))
-        AppNotify.sending(applicationContext, item.subject)
 
         return try {
             val atts = AttInfo.fromJson(item.attachmentsJson).toMutableList()
