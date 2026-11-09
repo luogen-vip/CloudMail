@@ -2,6 +2,7 @@ package com.rogan.cloudmail.mail
 
 import android.content.Context
 import com.rogan.cloudmail.data.*
+import kotlinx.coroutines.sync.withLock
 import java.util.*
 import javax.mail.BodyPart
 import javax.mail.Flags
@@ -158,8 +159,16 @@ object MailService {
         return s
     }
 
-    /** 同步单个账号，返回新收到的邮件(用于通知)。连接复用+增量 UID，速度极快 */
-    suspend fun syncAccount(ctx: Context, acc: Account, db: AppDatabase): List<MailMessage> {
+    // 每账号一把互斥锁：轮询同步与打开正文共用同一条长连接，同一 IMAPFolder 并发 open/close
+    // 会协议冲突，表现为“正文一直加载不出来/等一会没反应”，返回重进又正常。串行化后彻底解决。
+    private val folderMutexes = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+    private fun mutexFor(email: String) =
+        folderMutexes.computeIfAbsent(email) { kotlinx.coroutines.sync.Mutex() }
+
+    /** 同步单个账号，返回新收到的邮件(用于通知)。连接复用+增量 UID，速度极快。
+     *  每账号互斥：避免与 loadFull 并发操作同一 IMAP 连接 */
+    suspend fun syncAccount(ctx: Context, acc: Account, db: AppDatabase): List<MailMessage> =
+        mutexFor(acc.email).withLock {
         val newInbox = mutableListOf<MailMessage>()
         val store = getStore(acc)
         val inbox = store.getFolder("INBOX")
@@ -209,8 +218,9 @@ object MailService {
                 }
             }
         } else sentScanCounter[acc.email] = n
-        return newInbox
-    }
+        newInbox
+        }
+
 
     /** 增量入库：把 UID 大于基线且库里没有的邮件插入，返回新邮件并推进基线(轮询与推送线程共用，幂等) */
     private suspend fun insertNew(ctx: Context, acc: Account, db: AppDatabase,
@@ -305,6 +315,7 @@ object MailService {
      *  复用长连接(不再每次新建 SSL+登录，省 2~5 秒)：首次打开正文明显更快 */
     suspend fun loadFull(ctx: Context, acc: Account, msg: MailMessage, db: AppDatabase): MailMessage {
         if (msg.loaded) return msg
+        return mutexFor(acc.email).withLock {
         val store = getStore(acc)
         val f = if (msg.folder == "SENT") sentFolder(store) ?: return msg else store.getFolder("INBOX")
         if (!f.exists()) return msg
@@ -330,7 +341,8 @@ object MailService {
             val rrt = m.getHeader("Disposition-Notification-To")?.firstOrNull()
             if (!rrt.isNullOrBlank()) sendMdn(ctx, acc, msg, rrt)
         }
-        return updated
+        updated
+        }
     }
 
     private fun fileStore(ctx: Context, msgId: Long) =
