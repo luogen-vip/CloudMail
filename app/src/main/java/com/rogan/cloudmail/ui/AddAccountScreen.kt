@@ -226,12 +226,26 @@ fun AddAccountScreen(nav: NavHostController) {
     }
 }
 
-/** Microsoft OAuth2 网页授权：APP 内 WebView 完成登录，拦截跳转拿到授权码 */
+/** Microsoft OAuth2 网页授权：APP 内 WebView 完成登录，拦截跳转拿到授权码(带 PKCE) */
 @Composable
 fun OAuthDialog(onResult: (ok: Boolean, email: String?, token: String?, refresh: String?, expire: Long?, err: String?) -> Unit) {
     var loading by remember { mutableStateOf(true) }
     var err by remember { mutableStateOf<String?>(null) }
     var done by remember { mutableStateOf(false) }
+
+    // PKCE：verifier 随机串，challenge = BASE64URL(SHA256(verifier))
+    val verifier = remember {
+        val bytes = ByteArray(48)
+        java.security.SecureRandom().nextBytes(bytes)
+        android.util.Base64.encodeToString(bytes, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
+            .replace("=", "")
+    }
+    val challenge = remember(verifier) {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        android.util.Base64.encodeToString(md.digest(verifier.toByteArray()),
+            android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
+            .replace("=", "")
+    }
 
     AlertDialog(onDismissRequest = { if (!done) onResult(false, null, null, null, null, "用户取消") },
         title = { Text("微软账号授权登录") },
@@ -249,13 +263,15 @@ fun OAuthDialog(onResult: (ok: Boolean, email: String?, token: String?, refresh:
                                         if (done) return true
                                         done = true
                                         val code = java.net.URI(url).let { u ->
-                                            u.rawQuery?.split("&")?.firstOrNull { it.startsWith("code=") }?.substring(5)
+                                            val q = u.rawQuery ?: ""
+                                            q.split("&").firstOrNull { it.startsWith("code=") }
+                                                ?.substring(5)?.let { java.net.URLDecoder.decode(it, "UTF-8") }
                                         }
                                         val e2 = url.contains("error=")
                                         Thread {
                                             runCatching {
-                                                if (code.isNullOrBlank()) throw Exception(if (e2) "微软返回了错误" else "未获取到授权码")
-                                                val (token, refresh, expire) = MailService.msExchangeToken(code)
+                                                if (code.isNullOrBlank()) throw Exception(if (e2) "微软返回了错误，请重新授权" else "未获取到授权码，请重试")
+                                                val (token, refresh, expire) = MailService.msExchangeToken(code, verifier)
                                                 val em = jwtEmail(token) ?: throw Exception("无法从授权结果读取邮箱地址")
                                                 android.os.Handler(android.os.Looper.getMainLooper()).post {
                                                     onResult(true, em, token, refresh, expire, null)
@@ -272,7 +288,7 @@ fun OAuthDialog(onResult: (ok: Boolean, email: String?, token: String?, refresh:
                                 }
                                 override fun onPageFinished(view: android.webkit.WebView, u: String) { loading = false }
                             }
-                            loadUrl(MailService.msAuthorizeUrl())
+                            loadUrl(MailService.msAuthorizeUrl(challenge))
                         }
                     },
                     modifier = Modifier.fillMaxWidth().height(420.dp))
