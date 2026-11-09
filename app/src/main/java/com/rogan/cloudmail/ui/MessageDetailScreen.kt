@@ -177,30 +177,18 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
             // 加载中不显示“无正文内容”(避免误以为邮件没内容)：正文拉取完成前显示加载状态，
             // 只有确实加载完且正文为空才显示“无正文内容”
             val html = remember(m.id, m.bodyHtml, m.loaded) { htmlForWebView(m) }
-            if (loading) {
-                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        androidx.compose.material3.CircularProgressIndicator(Modifier.size(36.dp), strokeWidth = 3.dp)
-                        Spacer(Modifier.height(12.dp))
-                        Text("正在加载邮件内容…", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            } else if (!m.loaded) {
-                // 拉取失败(网络抖动/连接被服务器断开)：给出明确状态和一键重试，不再无限转圈
-                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("正文加载失败，可能是网络波动", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(10.dp))
-                        Button(onClick = { loading = true; loadKey++ }) { Text("重新加载") }
-                    }
-                }
-            } else androidx.compose.ui.viewinterop.AndroidView(
+            // WebView 常驻不拆装：之前“加载中/失败/正文”三个分支互切会整体销毁重建视图，
+            // 正文加载完成那一瞬间整个页面(包括顶部收件人区)闪白一下；现在始终挂载，
+            // 只用透明度和覆盖层控制显示，消除闪白
+            Box(Modifier.fillMaxWidth().weight(1f)) {
+                androidx.compose.ui.viewinterop.AndroidView(
                 factory = { viewCtx ->
                     android.webkit.WebView(viewCtx).apply {
                         settings.javaScriptEnabled = false
                         settings.allowFileAccess = true
                         settings.loadWithOverviewMode = true
                         settings.useWideViewPort = true
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
                         webViewClient = object : android.webkit.WebViewClient() {
                             override fun shouldOverrideUrlLoading(view: android.webkit.WebView, url: String): Boolean {
                                 if (url.startsWith("http://") || url.startsWith("https://")) {
@@ -231,9 +219,30 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         }
                     }
                 },
-                update = { wv -> wv.loadDataWithBaseURL(null, html, "text/html", "utf-8", null) },
-                modifier = Modifier.fillMaxWidth().weight(1f)
-            )
+                update = { wv ->
+                    wv.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
+                    wv.alpha = if (loading || !m.loaded) 0f else 1f
+                },
+                modifier = Modifier.fillMaxSize())
+                if (loading) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            androidx.compose.material3.CircularProgressIndicator(Modifier.size(36.dp), strokeWidth = 3.dp)
+                            Spacer(Modifier.height(12.dp))
+                            Text("正在加载邮件内容…", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                } else if (!m.loaded) {
+                    // 拉取失败(网络抖动/连接被服务器断开)：给出明确状态和一键重试，不再无限转圈
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("正文加载失败，可能是网络波动", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.height(10.dp))
+                            Button(onClick = { loading = true; loadKey++ }) { Text("重新加载") }
+                        }
+                    }
+                }
+            }
             // 附件区：默认折叠成一行，不再挤占正文浏览区(附件多时正文区域明显变小)；
             // 点一下展开完整列表，再点收起
             val atts = remember(m.attachmentsJson) { AttInfo.fromJson(m.attachmentsJson) }
