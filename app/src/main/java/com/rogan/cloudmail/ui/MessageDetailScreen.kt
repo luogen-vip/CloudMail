@@ -209,18 +209,23 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 return false
                             }
                         }
-                        // 点击正文中的图片 → 全屏预览/保存
-                        setOnTouchListener { _, ev ->
-                            if (ev.action == android.view.MotionEvent.ACTION_UP) {
+                        // 点击正文中的图片 → 全屏预览/保存。
+                        // 必须用 GestureDetector 的 onSingleTapConfirmed：之前直接监听 ACTION_UP，
+                        // 滑动浏览正文抬手时只要手指落在图片上就会误弹预览，严重影响浏览
+                        val gd = android.view.GestureDetector(viewCtx, object : android.view.GestureDetector.SimpleOnGestureListener() {
+                            override fun onSingleTapConfirmed(e: android.view.MotionEvent): Boolean {
                                 val hr = hitTestResult
                                 if (hr.type == android.webkit.WebView.HitTestResult.IMAGE_TYPE ||
                                     hr.type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
-                                    val src = hr.extra ?: return@setOnTouchListener false
-                                    val path = src.removePrefix("file://").substringBefore("?")
-                                    val f = File(path)
-                                    if (f.exists()) { showImg = f; return@setOnTouchListener true }
+                                    val src = hr.extra ?: return false
+                                    val f = File(src.removePrefix("file://").substringBefore("?"))
+                                    if (f.exists()) { showImg = f; return true }
                                 }
+                                return false
                             }
+                        })
+                        setOnTouchListener { _, ev ->
+                            gd.onTouchEvent(ev)
                             false
                         }
                     }
@@ -228,35 +233,45 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 update = { wv -> wv.loadDataWithBaseURL(null, html, "text/html", "utf-8", null) },
                 modifier = Modifier.fillMaxWidth().weight(1f)
             )
-            // 附件区
+            // 附件区：默认折叠成一行，不再挤占正文浏览区(附件多时正文区域明显变小)；
+            // 点一下展开完整列表，再点收起
             val atts = remember(m.attachmentsJson) { AttInfo.fromJson(m.attachmentsJson) }
             if (atts.isNotEmpty()) {
                 HorizontalDivider()
-                Column(Modifier.padding(12.dp)) {
-                    Text("附件 (${atts.size})", fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                    atts.forEach { a ->
-                        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                when {
-                                    a.mime.startsWith("image/") -> Icons.Default.Image
-                                    a.mime.startsWith("video/") -> Icons.Default.PlayCircle
-                                    a.mime.startsWith("audio/") -> Icons.Default.Headphones
-                                    else -> Icons.Default.InsertDriveFile
-                                }, null, tint = MaterialTheme.colorScheme.primary)
-                            Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                                Text(a.name, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                val sz = File(a.path).takeIf { it.exists() }?.length()
-                                Text("${sz?.let { fmtSize(it) } ?: "未知大小"} · ${a.mime.substringAfter('/', "file")}" +
-                                        if (a.dur > 0) " · 时长 ${a.dur / 60}分${a.dur % 60}秒" else "",
-                                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            TextButton(onClick = { openWithProvider(ctx, File(a.path), a.mime, a.name) }) { Text("打开", fontSize = 12.sp) }
-                            TextButton(onClick = {
-                                scope.launch(Dispatchers.IO) {
-                                    val saved = saveToDownloads(File(a.path), File(a.path).name)
-                                    withContext(Dispatchers.Main) { toast = "已保存到下载文件夹：${saved.name}" }
+                var attOpen by remember(m.id) { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth().clickable { attOpen = !attOpen }.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.AttachFile, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                    Text("附件 (${atts.size})", fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 8.dp))
+                    Spacer(Modifier.weight(1f))
+                    Text(if (attOpen) "收起 ▴" else "展开 ▾", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                }
+                if (attOpen) {
+                    Column(Modifier.padding(horizontal = 14.dp).padding(bottom = 8.dp)) {
+                        atts.forEach { a ->
+                            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    when {
+                                        a.mime.startsWith("image/") -> Icons.Default.Image
+                                        a.mime.startsWith("video/") -> Icons.Default.PlayCircle
+                                        a.mime.startsWith("audio/") -> Icons.Default.Headphones
+                                        else -> Icons.Default.InsertDriveFile
+                                    }, null, tint = MaterialTheme.colorScheme.primary)
+                                Column(Modifier.weight(1f).padding(start = 10.dp)) {
+                                    Text(a.name, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    val sz = File(a.path).takeIf { it.exists() }?.length()
+                                    Text("${sz?.let { fmtSize(it) } ?: "未知大小"} · ${a.mime.substringAfter('/', "file")}" +
+                                            if (a.dur > 0) " · 时长 ${a.dur / 60}分${a.dur % 60}秒" else "",
+                                        fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                            }) { Text("保存", fontSize = 12.sp) }
+                                TextButton(onClick = { openWithProvider(ctx, File(a.path), a.mime, a.name) }) { Text("打开", fontSize = 12.sp) }
+                                TextButton(onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        val saved = saveToDownloads(File(a.path), File(a.path).name)
+                                        withContext(Dispatchers.Main) { toast = "已保存到下载文件夹：${saved.name}" }
+                                    }
+                                }) { Text("保存", fontSize = 12.sp) }
+                            }
                         }
                     }
                 }
