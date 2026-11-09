@@ -153,9 +153,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 }
             }
             HorizontalDivider()
-            if (loading) {
-                LinearProgressIndicator(Modifier.fillMaxWidth())
-            }
+            // 说明：后台静默拉取正文，不显示来回走动的进度条(手动刷新时才有进度提示)
             // 正文 WebView(占据剩余全部空间，滑动范围更大)
             val html = remember(m.id, m.bodyHtml) { htmlForWebView(m) }
             androidx.compose.ui.viewinterop.AndroidView(
