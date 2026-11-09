@@ -90,14 +90,27 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     var syncMsg by remember { mutableStateOf<String?>(null) }
     var lastAutoSync by remember { mutableStateOf(0L) }
     var manualSync by remember { mutableStateOf(false) } // 只有手动点刷新才显示顶部进度条
+    // 粘性的“首次同步未完成”状态：首次登录同步期间空文件夹连续显示“正在同步”，
+    // 不再在两轮同步间隙闪“暂无邮件”；同步完成(或超时兑底)后才显示真实的空状态文案
+    var initialSyncDone by remember { mutableStateOf(false) }
+    var dbEmpty by remember { mutableStateOf(true) }
 
     val refresh = {
         scope.launch {
-            accounts = db.accounts().all()
-            // 为每个账号启动 IMAP IDLE 推送线程：服务器主动推，新邮件毫秒级入库(比任何轮询都快)
-            accounts.forEach { com.rogan.cloudmail.mail.MailService.startPush(ctx, it, db) }
-            unreadMap = accounts.associate { it.id to db.messages().unreadCount(it.id) }
-            outboxCount = db.outbox().all().size
+            // 数据库查询移到 IO 线程：之前在主线程读库，账号/邮件多时会卡顿一下，
+            // 表现为滑动列表偶发顿住、点击没反应，再操作一次才正常
+            val (accs, uMap, ob, empty) = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val a = db.accounts().all()
+                a.forEach { com.rogan.cloudmail.mail.MailService.startPush(ctx, it, db) }
+                val u = a.associate { it.id to db.messages().unreadCount(it.id) }
+                val o = db.outbox().all().size
+                val e = db.messages().countAll() == 0
+                listOf(a, u, o, e)
+            }
+            accounts = accs as List<com.rogan.cloudmail.data.Account>
+            unreadMap = uMap as Map<Long, Int>
+            outboxCount = ob as Int
+            dbEmpty = empty as Boolean
             if (folder.startsWith("account:") && accounts.none { it.id.toString() == folder.substringAfter(":") }) folder = "all"
         }
         Unit
@@ -138,12 +151,12 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
                     syncing = false
                     manualSync = false
+                    initialSyncDone = true
                     refresh()
-                    // 只有确实有变化时才重建列表：新邮件到达/手动刷新时回顶显示最新；静默无新邮件不打扰当前浏览位置
-                    if (showBar || newMails.isNotEmpty()) {
-                        reloadKey++
-                        if (newMails.isNotEmpty()) scrollNonce++
-                    }
+                    // 每轮同步结束后都重建列表：首次登录时首轮同步可能没拉到未读邮件，
+                    // 之前“没有新邮件就不刷新”会导致列表一直停在“暂无邮件”，切个文件夹才出来
+                    reloadKey++
+                    if (newMails.isNotEmpty()) scrollNonce++
                     if (showBar) {
                         // 手动刷新一定给结果反馈
                         syncMsg = if (newMails.isEmpty()) "已刷新，暂无新邮件" else "已刷新，收到 ${newMails.size} 封新邮件"
@@ -191,6 +204,12 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 doSync(false)
             }
         }
+    }
+
+    // 超时兑底：即使同步一直不成功，20 秒后也恢复正常空状态提示，不永远转圈
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(20000)
+        initialSyncDone = true
     }
 
     // 回到前台/进入主页时自动同步(8秒节流)，保证新邮件马上可见
@@ -306,7 +325,7 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                         }
                     }
                     if (folder == "outbox") OutboxList(nav, refresh) else MessageList(nav, folder, refresh, sortMode, reloadKey, sortNonce, scrollNonce,
-                        syncingEmpty = syncing)
+                        syncingEmpty = !initialSyncDone && dbEmpty)
                 }
                 if (manualSync) LinearProgressIndicator(Modifier.fillMaxWidth())
                 syncMsg?.let { t ->
@@ -388,11 +407,14 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     val reload = { scope.launch { msgs = loadList() }; Unit }
 
     // 关键修复：加载数据和回顶放在同一个协程里顺序执行。
-    // 之前是两个独立的 LaunchedEffect，回顶在数据重排完成前就执行了(对着旧列表滑到顶部)，
-    // 导致偶发性“点了排序没回顶/还在排序前的位置”，看起来时灵时不灵。
-    // 现在每次触发(点排序/有新邮件/手动刷新/切文件夹)都 100% 先重排、再滑到绝对顶部。
+    // reloadKey(后台同步/操作后刷新)不回顶，避免正在浏览时被强行拉回顶部；
+    // 换文件夹/点排序/新邮件到达才回顶
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(folder, reloadKey, sortMode, sortNonce, scrollNonce) {
+    LaunchedEffect(folder, reloadKey) {
+        msgs = loadList()
+        firstLoad = false
+    }
+    LaunchedEffect(folder, sortMode, sortNonce, scrollNonce) {
         msgs = loadList()
         firstLoad = false
         listState.scrollToItem(0)
@@ -436,7 +458,7 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
         if (msgs.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 // 首次登录正在从服务器拉取邮件(或首次加载本地库)时：明确显示“正在同步”，
-                // 不再让用户误以为没有邮件；同步完成后列表自动出现
+                // 同步期间连续显示不闪烁；同步完成/超时后如实显示空状态
                 if (firstLoad || syncingEmpty) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         androidx.compose.material3.CircularProgressIndicator(Modifier.size(34.dp), strokeWidth = 3.dp)
