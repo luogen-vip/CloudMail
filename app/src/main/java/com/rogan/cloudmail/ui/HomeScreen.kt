@@ -95,6 +95,13 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     var initialSyncDone by remember { mutableStateOf(false) }
     var dbEmpty by remember { mutableStateOf(true) }
 
+    // 提示条用 Scaffold 标准的 SnackbarHost：之前直接把 Snackbar 放在内容层顶部，
+    // 会被顶栏遮住看不见(与写邮件页同样的 bug)，改用标准宿主后提示一定可见
+    val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
+    LaunchedEffect(syncMsg) {
+        syncMsg?.let { snackbar.showSnackbar(it); syncMsg = null }
+    }
+
     val refresh = {
         scope.launch {
             // 数据库查询移到 IO 线程：之前在主线程读库，账号/邮件多时会卡顿一下，
@@ -301,6 +308,7 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
         }
     ) {
         Scaffold(
+            snackbarHost = { SnackbarHost(snackbar) },
             topBar = {
                 TopAppBar(
                     title = { Text(folderTitle(folder)) },
@@ -344,10 +352,6 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                         syncingEmpty = !initialSyncDone && dbEmpty)
                 }
                 if (manualSync) LinearProgressIndicator(Modifier.fillMaxWidth())
-                syncMsg?.let { t ->
-                    Snackbar(Modifier.padding(16.dp)) { Text(t) }
-                    LaunchedEffect(t) { kotlinx.coroutines.delay(2500); syncMsg = null }
-                }
             }
         }
         // 首次使用引导：还没有任何账号时,引导先添加邮箱
@@ -417,11 +421,27 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             folder.startsWith("account:") -> db.messages().byAccount(folder.substringAfter(":").toLong())
             else -> db.messages().allMail()
         }
+        // 同一封邮件只显示一条(按 Message-ID 合并)：
+        // - 给自己发邮件时，服务器同时存在「已发送(SENT)」和「收件箱(INBOX)」两份副本，列表出现两条一模一样的；
+        // - 推送+同步竞态偶尔也会往 INBOX 插入两条同一封。
+        // 合并规则：保留先出现的一条；若已保留的是 SENT 而当前是 INBOX，用 INBOX 那条替换(收件箱视角更对)
+        val seen = mutableMapOf<String, Int>() // key -> dedup 中的下标
+        val dedup = mutableListOf<MailMessage>()
+        for (m in rows) {
+            val key = m.messageId.ifBlank { "k:${m.accountId}|${m.folder}|${m.uid}" }
+            val prev = seen[key]
+            if (prev == null) {
+                seen[key] = dedup.size
+                dedup.add(m)
+            } else if (dedup[prev].folder == "SENT" && m.folder == "INBOX") {
+                dedup[prev] = m
+            }
+        }
         when (sortMode) {
-            1 -> rows.sortedBy { it.date }
-            2 -> rows.sortedByDescending { it.size }
-            3 -> rows.sortedBy { it.size }
-            else -> rows.sortedByDescending { it.date }
+            1 -> dedup.sortedBy { it.date }
+            2 -> dedup.sortedByDescending { it.size }
+            3 -> dedup.sortedBy { it.size }
+            else -> dedup.sortedByDescending { it.date }
         }
     }
     // 关键修复：加载数据和回顶放在同一个协程里顺序执行。
