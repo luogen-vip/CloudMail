@@ -26,8 +26,11 @@ object MailService {
             "&response_mode=query&scope=${java.net.URLEncoder.encode(MS_SCOPES, "UTF-8")}" +
             "&code_challenge=$codeChallenge&code_challenge_method=S256&prompt=select_account"
 
-    /** 用授权码换取令牌(需携带 PKCE 校验器)，返回 (accessToken, refreshToken, 过期毫秒) */
-    fun msExchangeToken(code: String, verifier: String): Triple<String, String, Long> {
+    /** OAuth 令牌(含 id_token)：id_token 中的 email/preferred_username 比访问令牌更可靠 */
+    data class MsTokens(val access: String, val refresh: String, val expire: Long, val idToken: String)
+
+    /** 用授权码换取令牌(需携带 PKCE 校验器)，返回完整令牌信息 */
+    fun msExchangeToken(code: String, verifier: String): MsTokens {
         val body = "client_id=$MS_CLIENT_ID&grant_type=authorization_code" +
                 "&code=${java.net.URLEncoder.encode(code, "UTF-8")}&redirect_uri=$MS_REDIRECT" +
                 "&code_verifier=${java.net.URLEncoder.encode(verifier, "UTF-8")}"
@@ -35,14 +38,14 @@ object MailService {
     }
 
     /** 用刷新令牌续期 */
-    fun msRefreshToken(refresh: String): Triple<String, String, Long> {
+    fun msRefreshToken(refresh: String): MsTokens {
         val body = "client_id=$MS_CLIENT_ID&grant_type=refresh_token" +
                 "&refresh_token=${java.net.URLEncoder.encode(refresh, "UTF-8")}" +
                 "&scope=${java.net.URLEncoder.encode(MS_SCOPES, "UTF-8")}"
         return msTokenRequest(body)
     }
 
-    private fun msTokenRequest(form: String): Triple<String, String, Long> {
+    private fun msTokenRequest(form: String): MsTokens {
         val url = java.net.URL("https://login.microsoftonline.com/common/oauth2/v2.0/token")
         val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
             requestMethod = "POST"
@@ -63,24 +66,25 @@ object MailService {
         }
         val json = org.json.JSONObject(respText)
         if (json.has("error")) throw Exception("OAuth 失败：${json.optString("error_description")}")
-        return Triple(
-            json.getString("access_token"),
-            json.optString("refresh_token", ""),
-            System.currentTimeMillis() + (json.optLong("expires_in", 3600) - 120) * 1000
+        return MsTokens(
+            access = json.getString("access_token"),
+            refresh = json.optString("refresh_token", ""),
+            expire = System.currentTimeMillis() + (json.optLong("expires_in", 3600) - 120) * 1000,
+            idToken = json.optString("id_token", "")
         )
     }
 
-    /** 内存令牌缓存：email -> (token, refresh, 过期毫秒) */
-    private val tokenCache = java.util.concurrent.ConcurrentHashMap<String, Triple<String, String, Long>>()
+    /** 内存令牌缓存：email -> 令牌信息 */
+    private val tokenCache = java.util.concurrent.ConcurrentHashMap<String, MsTokens>()
 
     /** 返回可用令牌：过期前自动用刷新令牌续期 */
     fun ensureToken(acc: Account): String {
         if (acc.oauthRefresh.isBlank()) return acc.password
         val cached = tokenCache[acc.email]
-        if (cached != null && cached.third > System.currentTimeMillis() + 60_000) return cached.first
-        val (at, rt, ex) = msRefreshToken(cached?.second ?: acc.oauthRefresh)
-        tokenCache[acc.email] = Triple(at, rt.ifBlank { acc.oauthRefresh }, ex)
-        return at
+        if (cached != null && cached.expire > System.currentTimeMillis() + 60_000) return cached.access
+        val t = msRefreshToken(cached?.refresh ?: acc.oauthRefresh)
+        tokenCache[acc.email] = t.copy(refresh = t.refresh.ifBlank { acc.oauthRefresh })
+        return t.access
     }
 
     /* ---------- 会话/连接 ---------- */
