@@ -167,9 +167,14 @@ object MailService {
         val uidFolder = inbox as UIDFolder
         val seen0 = lastSeenUid[acc.email]
         if (seen0 == null) {
-            // 首次(每次启动后第一轮)：扫描最近 50 封建立基线，同时把库里缺的补进来
+            // 首次(每次启动后第一轮)：用 UIDNext 直接定位最近 50 封建立基线(不再全量列出，
+            // 大邮箱全量列出要 10 秒以上；UIDNext 定位亚秒级)，同时把库里缺的补进来
             var maxUid = 0L
-            for (m in inbox.messages.toList().takeLast(50)) {
+            val uidNext = runCatching { uidFolder.uidNext }.getOrDefault(1L)
+            val start = maxOf(1L, uidNext - 50)
+            val recent = runCatching { uidFolder.getMessagesByUID(start, uidNext - 1) }
+                .getOrNull()?.toList() ?: emptyList()
+            for (m in recent) {
                 if (m.isExpunged) continue
                 val uid = uidFolder.getUID(m)
                 if (uid > maxUid) maxUid = uid
@@ -178,7 +183,7 @@ object MailService {
                 db.messages().insert(ent)
                 if (!ent.isRead) newInbox.add(ent)
             }
-            lastSeenUid[acc.email] = maxUid
+            lastSeenUid[acc.email] = maxOf(maxUid, uidNext - 1)
         } else {
             // 之后每一轮：只拉基线 UID 之后的新邮件(通常 0 封，一次轻量查询，亚秒级完成)
             val fresh = runCatching { uidFolder.getMessagesByUID((seen0 ?: 0L) + 1, UIDFolder.LASTUID) }.getOrNull()
@@ -296,36 +301,36 @@ object MailService {
 
     /* ---------- 正文与附件 ---------- */
 
-    /** 拉取完整正文+附件到本地，返回更新后的实体 */
+    /** 拉取完整正文+附件到本地，返回更新后的实体。
+     *  复用长连接(不再每次新建 SSL+登录，省 2~5 秒)：首次打开正文明显更快 */
     suspend fun loadFull(ctx: Context, acc: Account, msg: MailMessage, db: AppDatabase): MailMessage {
         if (msg.loaded) return msg
-        connectImap(acc).use { store ->
-            val f = store.getFolder(if (msg.folder == "SENT") "Sent" else "INBOX")
-            if (!f.exists()) return msg
-            f.open(Folder.READ_ONLY)
-            val uidFolder = f as UIDFolder
-            val m = uidFolder.getMessageByUID(msg.uid.toLong()) ?: return msg
-            val atts = mutableListOf<AttInfo>()
-            val body = extractBody(ctx, m, msg.id, atts)
-            val updated = msg.copy(
-                bodyHtml = body,
-                snippet = android.text.Html.fromHtml(
-                    body.replace(Regex("<br\\s*/?>"), "\n").replace(Regex("<[^>]+>"), ""),
-                    android.text.Html.FROM_HTML_MODE_LEGACY
-                ).toString().take(120),
-                hasAttachments = atts.isNotEmpty(),
-                attachmentsJson = org.json.JSONArray().apply { atts.forEach { put(org.json.JSONObject(it.toJson())) } }.toString(),
-                loaded = true
-            )
-            db.messages().update(updated)
-            f.close(false)
-            // 真实已读回执(MDN)：对方要求回执且这是收件时,回执一次
-            runCatching {
-                val rrt = m.getHeader("Disposition-Notification-To")?.firstOrNull()
-                if (!rrt.isNullOrBlank()) sendMdn(ctx, acc, msg, rrt)
-            }
-            return updated
+        val store = getStore(acc)
+        val f = if (msg.folder == "SENT") sentFolder(store) ?: return msg else store.getFolder("INBOX")
+        if (!f.exists()) return msg
+        f.open(Folder.READ_ONLY)
+        val uidFolder = f as UIDFolder
+        val m = uidFolder.getMessageByUID(msg.uid.toLong()) ?: return msg
+        val atts = mutableListOf<AttInfo>()
+        val body = extractBody(ctx, m, msg.id, atts)
+        val updated = msg.copy(
+            bodyHtml = body,
+            snippet = android.text.Html.fromHtml(
+                body.replace(Regex("<br\\s*/?>"), "\n").replace(Regex("<[^>]+>"), ""),
+                android.text.Html.FROM_HTML_MODE_LEGACY
+            ).toString().take(120),
+            hasAttachments = atts.isNotEmpty(),
+            attachmentsJson = org.json.JSONArray().apply { atts.forEach { put(org.json.JSONObject(it.toJson())) } }.toString(),
+            loaded = true
+        )
+        db.messages().update(updated)
+        f.close(false)
+        // 真实已读回执(MDN)：对方要求回执且这是收件时,回执一次
+        runCatching {
+            val rrt = m.getHeader("Disposition-Notification-To")?.firstOrNull()
+            if (!rrt.isNullOrBlank()) sendMdn(ctx, acc, msg, rrt)
         }
+        return updated
     }
 
     private fun fileStore(ctx: Context, msgId: Long) =
