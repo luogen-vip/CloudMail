@@ -67,17 +67,15 @@ fun SettingsScreen(nav: NavHostController) {
             ListItem(headlineContent = { Text("搜索邮件/联系人") },
                 leadingContent = { Icon(Icons.Default.Search, null) },
                 modifier = Modifier.clickable { nav.navigate("search") })
-            ListItem(headlineContent = { Text("回收站管理") },
-                supportingContent = { Text("在侧边栏「已删除(回收站)」中查看、还原或彻底删除；列表页内有「清空回收站」按钮") },
-                leadingContent = { Icon(Icons.Default.DeleteSweep, null) },
-                modifier = Modifier.clickable { nav.popBackStack() })
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text("功能说明", fontSize = 16.sp, fontWeight = FontWeight.Bold)
             val tips = listOf(
+                "已删除(回收站)：在侧边栏打开，可还原或彻底删除；列表页内有「清空回收站」按钮。",
+                "未读邮件：在侧边栏打开，里面可「全部标为已读」；已读状态保存在本机，不会因重启恢复为未读。",
                 "撤回：邮件协议限制，撤回会删除服务器上的原邮件并向收件人发送撤回通知；同一服务商效果最佳。",
                 "已读回执：发送时开启「已读回执」，同域邮箱(QQ→QQ等)支持更好，跨域邮箱无法保证。",
                 "定时发送：写邮件页点击时钟图标设置，到点自动真实发送。",
-                "广告邮件：含退订头或营销关键词的邮件会自动标注「广告」。",
+                "Outlook/Hotmail：微软已关闭密码直接登录，请在添加账号时使用「微软账号授权登录」。",
                 "重要联系人：来信通知会明确标注重要联系人身份。"
             )
             tips.forEach { Text("· $it", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -87,7 +85,7 @@ fun SettingsScreen(nav: NavHostController) {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text("关于云邮", fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Text("版本 1.0.0", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("版本 1.2.0", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("作者：罗根", fontSize = 15.sp, fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary)
                     Text("一款支持多账号、多服务商的真实邮箱客户端", fontSize = 12.sp,
