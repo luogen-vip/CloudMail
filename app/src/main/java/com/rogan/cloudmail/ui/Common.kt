@@ -94,6 +94,20 @@ fun displayName(remark: String?, email: String, fallbackName: String = "") =
 
 val emailRegex = Regex("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$")
 
+/** 判断是否为系统退信(DSN)：发件人是 mailer-daemon/postmaster，或主题命中常见退信关键词。
+ *  退信说明对方地址/域名可能不存在或已满/拒收——列表、详情、通知都要明确提示，
+ *  不能像普通新邮件一样只显示发件人(否则用户以为发送成功，其实是被退回了) */
+fun isBounceMail(fromAddr: String, subject: String): Boolean =
+    fromAddr.contains("mailer-daemon", true) ||
+            fromAddr.contains("postmaster", true) ||
+            subject.contains("Undeliverable", true) ||
+            subject.contains("退信", false) ||
+            subject.contains("退回", false) ||
+            subject.contains("Undelivered", true) ||
+            subject.contains("Mail Delivery", true) ||
+            subject.contains("Returned mail", true) ||
+            subject.contains("Delivery Status", true)
+
 fun saveToDownloads(src: File, name: String): File {
     val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
     dir.mkdirs()
