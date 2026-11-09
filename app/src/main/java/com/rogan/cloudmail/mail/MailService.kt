@@ -187,10 +187,10 @@ object MailService {
         } catch (e: Exception) { "" }
     }
 
-    private fun collectAttachment(ctx: Context, p: BodyPart, msgId: Long, atts: MutableList<AttInfo>) {
+    private fun collectAttachment(ctx: Context, p: Part, msgId: Long, atts: MutableList<AttInfo>) {
         runCatching {
             val disp = p.disposition
-            val cid = runCatching { p.contentID?.trim('\"', '<', '>') ?: "" }.getOrDefault("")
+            val cid = runCatching { p.getHeader("Content-ID")?.firstOrNull()?.trim('\"', '<', '>') ?: "" }.getOrDefault("")
             val fileName = javax.mail.internet.MimeUtility.decodeText(p.fileName ?: "附件")
             if (disp == null && cid.isEmpty()) return
             if (disp != null && disp.equals(Part.INLINE, true) && fileName.isEmpty() && cid.isEmpty()) return
