@@ -70,23 +70,25 @@ fun AddAccountScreen(nav: NavHostController) {
         Text("支持 QQ / 163 / 139 / Outlook / Gmail 及任意自定义邮箱；QQ、163 等需填授权码",
             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-        // 预设选择
-        Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        // 预设选择：紧凑换行布局，点选后紧跟输入框
+        @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+        androidx.compose.foundation.layout.FlowRow(
+            Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)) {
             PRESETS.forEach { p ->
-                OutlinedButton(
+                FilterChip(
+                    selected = preset?.name == p.name,
                     onClick = {
                         preset = p
                         imapHost = p.imapHost; imapPort = p.imapPort.toString()
                         smtpHost = p.smtpHost; smtpPort = p.smtpPort.toString(); smtpSsl = p.smtpSsl
                     },
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = if (preset?.name == p.name) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                ) { Text(p.name, fontSize = 12.sp) }
+                    label = { Text(p.name, fontSize = 12.sp) }
+                )
             }
         }
-        preset?.let { Text("提示：${it.hint}", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary) }
-
-        Spacer(Modifier.height(8.dp))
+        preset?.let { Text("提示：${it.hint}", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 4.dp)) }
         TextField(value = email, onValueChange = {
             email = it
         }, label = { Text("邮箱地址") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
@@ -128,6 +130,14 @@ fun AddAccountScreen(nav: NavHostController) {
 
         Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(enabled = !testing, onClick = {
+                if (!emailRegex.matches(email.text.trim())) {
+                    msg = "邮箱地址格式不正确：请输入完整地址，如 someone@qq.com（不能只填数字或文字）"
+                    return@OutlinedButton
+                }
+                if (password.text.isBlank()) {
+                    msg = "请填写密码或授权码"
+                    return@OutlinedButton
+                }
                 testing = true; msg = "正在验证登录…"
                 scope.launch {
                     val acc = buildAccount(email.text.trim(), password.text, nickname.text,
