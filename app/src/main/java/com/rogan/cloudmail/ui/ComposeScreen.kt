@@ -23,8 +23,14 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextDecoration
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMap
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -294,9 +300,10 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     DisposableEffect(Unit) {
         onDispose {
             // 只有用户手动输入过内容才自动存草稿；从联系人/转发自动带入的内容不算，返回时不误存也不误弹
-            // onDispose 无协程上下文，仅此一次性退出场景用 runBlocking 兑底(快照写库，耗时极短)
+            // 必须在后台线程写库：之前用 runBlocking 在主线程同步写库，切换到其他 APP 再回来时
+            // 主线程可能正被这次写库占住，点发送的点击全被吞掉(看起来就是“完全没反应”)
             if (!savedOnExit && loadedDraft && userEdited && hasManualContent && sendAccId > 0)
-                kotlinx.coroutines.runBlocking { runCatching { saveDraftNow() } }
+                kotlinx.coroutines.GlobalScope.launch { runCatching { saveDraftNow() } }
             runCatching { player?.release() }
         }
     }
@@ -373,6 +380,15 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
 
     var sending by remember { mutableStateOf(false) }
 
+    // 发送看门狗：万一发送流程被异常卡住(数据库/系统繁忙)，45 秒后自动恢复发送按钮并提示，
+    // 避免“发送图标永远变成转圈、再点没反应”卡死
+    LaunchedEffect(sending) {
+        if (sending) {
+            kotlinx.coroutines.delay(45000)
+            if (sending) { sending = false; savedOnExit = false; toast = "发送超时，请检查网络后重试" }
+        }
+    }
+
     fun doSend(scheduledAt: Long?) {
         if (sending) return
         val rcpt = toRows.map { it.trim() }.filter { it.isNotBlank() }
@@ -431,7 +447,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     kotlinx.coroutines.delay(600); nav.popBackStack()
                 }
             }
-          } catch (e: Exception) {
+          } catch (e: Throwable) {
+            // 捕获 Throwable：任何异常(包括罕见系统错误)都必须恢复按钮并给出提示，绝不静默无反应
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 sending = false
                 savedOnExit = false
@@ -568,6 +585,9 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         value = b.tv,
                         onValueChange = { i -> val idx = blocks.indexOfFirst { it.id == b.id }; if (idx >= 0) blocks[idx] = BodyBlock.T(b.id, i); userEdited = true },
                         placeholder = { Text("正文内容…", fontSize = 14.sp) },
+                        // 所见即所得：正文里的 [文字](链接) 显示成蓝色下划线的「文字」(括号/地址不显示)，
+                        // 发送时仍真实转成 <a> 超链接。光标/选区偏移在 MdLinkOffsetMap 中精确映射，编辑不受影响
+                        visualTransformation = mdLinkVisual(),
                         modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 180.dp)
                             .onFocusChanged { if (it.isFocused) focusBlockId = b.id },
                         colors = TextFieldDefaults.colors(
@@ -909,6 +929,47 @@ fun fmtSize(bytes: Long): String = when {
     bytes >= 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
     bytes >= 1024 -> String.format(java.util.Locale.US, "%.0f KB", bytes / 1024.0)
     else -> "$bytes B"
+}
+
+/** 正文里的 [文字](链接) 编辑区所见即所得变换：显示成蓝色下划线的「文字」，隐藏括号/地址。
+ *  内部精确维护原始↔显示双向光标偏移映射，编辑、选区、插入均不受影响 */
+fun mdLinkVisual(): VisualTransformation = VisualTransformation { tfv ->
+    val src = tfv.text
+    val re = Regex("\\[([^\\]]+)\\]\\((https?://[^)\\s]+)\\)")
+    val b = AnnotatedString.Builder()
+    val o2t = IntArray(src.length + 1)
+    val t2o = IntArray(src.length + 1)
+    var oi = 0   // 原始文本下标
+    var ti = 0   // 显示文本下标
+    for (m in re.findAll(src)) {
+        // 链接前的普通文本逐字映射
+        while (oi < m.range.first) {
+            o2t[oi] = ti; t2o[ti] = oi
+            b.append(src[oi]); oi++; ti++
+        }
+        // '['：原位置映射到链接文字开头(光标停在链接前)
+        o2t[oi] = ti; oi++
+        val labelStart = ti
+        val label = m.groupValues[1]
+        for (ch in label) { o2t[oi] = ti; t2o[ti] = oi; b.append(ch); oi++; ti++ }
+        b.addStyle(SpanStyle(color = Color(0xFF1565C0), textDecoration = TextDecoration.Underline), labelStart, ti)
+        // ']','(',url,')' 全部隐藏：原位置都映射到链接文字结尾
+        o2t[oi] = ti; oi++ // ']'
+        o2t[oi] = ti; oi++ // '('
+        repeat(m.groupValues[2].length) { o2t[oi] = ti; oi++ }
+        o2t[oi] = ti; oi++ // ')'
+    }
+    while (oi < src.length) {
+        o2t[oi] = ti; t2o[ti] = oi
+        b.append(src[oi]); oi++; ti++
+    }
+    o2t[oi] = ti          // 原文末尾 → 显示末尾
+    t2o[ti] = oi          // 显示末尾 → 原文末尾
+    val om = object : OffsetMap {
+        override fun originalToTransformed(offset: Int): Int = o2t[offset.coerceIn(0, src.length)]
+        override fun transformedToOriginal(offset: Int): Int = t2o[offset.coerceIn(0, ti)]
+    }
+    TransformedText(b.toAnnotatedString(), om)
 }
 
 /** 单段纯文本 → HTML：转义、换行、[文字](链接)、自动高亮真实URL */
