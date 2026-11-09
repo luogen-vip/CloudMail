@@ -1,0 +1,47 @@
+name: Build CloudMail APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+  release:
+    types: [ created ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk CloudMail-debug.apk
+
+      - name: Upload artifact (每次编译都可在 Actions 页面下载)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CloudMail-APK
+          path: CloudMail-debug.apk
+
+      - name: Attach APK to Release (打 tag 或创建 Release 时)
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: CloudMail-debug.apk
