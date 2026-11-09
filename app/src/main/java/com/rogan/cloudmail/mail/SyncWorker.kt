@@ -34,19 +34,30 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             WorkManager.getInstance(context).enqueueUniqueWork("sync_now", ExistingWorkPolicy.REPLACE, req)
         }
 
-        /** 新邮件弹通知(发件人备注优先 + 摘要 + 点击跳转)；手动同步与后台同步共用 */
+        /** 新邮件弹通知(发件人备注优先 + 摘要 + 点击跳转)；手动同步与后台同步共用。
+         *  退信(DSN)单独文案：明确告知“邮件没送达”，不再像普通新邮件一样只显示发件人 */
         suspend fun notifyNew(ctx: Context, accId: Long, m: MailMessage) {
             val cdb = AppDatabase.get(ctx)
             val contact = cdb.contacts().byEmail(m.fromAddr)
             val sender = contact?.remark?.ifBlank { null } ?: m.fromName.ifBlank { m.fromAddr }
+            val bounce = com.rogan.cloudmail.ui.isBounceMail(m.fromAddr, m.subject)
+            val title = when {
+                bounce -> "⚠️ 邮件退信：发送未送达"
+                contact?.isImportant == true -> "★ 重要联系人：$sender"
+                else -> sender
+            }
             val text = buildString {
-                append(m.subject.ifBlank { "(无主题)" })
-                if (m.snippet.isNotBlank() && m.snippet != m.subject) append("\n").append(m.snippet.take(80))
+                if (bounce) {
+                    append("您之前发送的邮件被退回，对方地址可能不存在/已满/被拒收")
+                    if (m.subject.isNotBlank()) append("。").append(m.subject.take(50))
+                } else {
+                    append(m.subject.ifBlank { "(无主题)" })
+                    if (m.snippet.isNotBlank() && m.snippet != m.subject) append("\n").append(m.snippet.take(80))
+                }
             }
             val deleteIntent = Intent(ctx, DeleteReceiver::class.java).apply { putExtra("msgId", m.id) }
             val dpi = PendingIntent.getBroadcast(ctx, m.id.toInt(), deleteIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            val title = if (contact?.isImportant == true) "★ 重要联系人：$sender" else sender
             AppNotify.newMail(ctx, m.id, title, text, dpi, m.isAd)
         }
     }
