@@ -524,7 +524,8 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                             // 再进详情；即使马上返回也不会因协程被取消而漏写已读
                                             if (!m.isRead) {
                                                 msgs = msgs.map { if (it.id == m.id) it.copy(isRead = true) else it }
-                                                runCatching { kotlinx.coroutines.runBlocking { db.messages().setRead(m.id, true) } }
+                                                // 异步落库已读(之前 runBlocking 同步写库卡主线程，导致列表滑动/点击偶发卡顿)
+                                                scope.launch { runCatching { db.messages().setRead(m.id, true) } }
                                             }
                                             nav.navigate("detail/${m.id}")
                                         }
