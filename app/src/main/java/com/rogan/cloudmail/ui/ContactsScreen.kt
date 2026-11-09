@@ -94,7 +94,20 @@ fun ContactsScreen(nav: NavHostController) {
         // 切换排序方式后强制回到列表绝对顶部
         val listState = androidx.compose.foundation.lazy.rememberLazyListState()
         androidx.compose.runtime.LaunchedEffect(sortMode, importantFirst) { listState.scrollToItem(0) }
-        LazyColumn(state = listState, modifier = Modifier.padding(pad).fillMaxSize()) {
+        // 空状态：没有联系人时明确告诉用户，而不是白屏；添加/删除联系人后自动出现/消失
+        if (sorted.isEmpty()) {
+            Box(Modifier.padding(pad).fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.People, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(10.dp))
+                    Text("暂无联系人", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(4.dp))
+                    Text("点右下角「添加联系人」即可创建；\n收到新邮件时发件人也会自动积累到这里",
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                }
+            }
+        } else LazyColumn(state = listState, modifier = Modifier.padding(pad).fillMaxSize()) {
             items(sorted, key = { it.id }) { c ->
                 Row(Modifier.fillMaxWidth().clickable { nav.navigate("contactEdit/${c.id}") }
                     .padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
