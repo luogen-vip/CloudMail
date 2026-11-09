@@ -96,6 +96,8 @@ object MailService {
         put("mail.imaps.ssl.enable", "true")
         put("mail.imaps.connectiontimeout", "20000")
         put("mail.imaps.timeout", "30000")
+        // IDLE 心跳：30 秒一次保活探测，防止长连接静默断开
+        put("mail.imaps.heartbeatinterval", "30000")
         put("mail.mime.decodetext.strict", "false")
         if (acc.oauthToken.isNotBlank() || acc.oauthRefresh.isNotBlank())
             put("mail.imaps.auth.mechanisms", "XOAUTH2")
@@ -178,21 +180,9 @@ object MailService {
             }
             lastSeenUid[acc.email] = maxUid
         } else {
-            val seen: Long = seen0
             // 之后每一轮：只拉基线 UID 之后的新邮件(通常 0 封，一次轻量查询，亚秒级完成)
-            val fresh = runCatching { uidFolder.getMessagesByUID(seen + 1, UIDFolder.LASTUID) }.getOrNull()
-            var maxUid = seen
-            if (fresh != null) for (m in fresh) {
-                if (m == null || m.isExpunged) continue
-                val uid = uidFolder.getUID(m)
-                if (uid <= seen) continue
-                if (db.messages().byUid(acc.id, "INBOX", uid.toString()) != null) continue
-                val ent = toEntity(acc.id, "INBOX", uid.toString(), m, ctx)
-                db.messages().insert(ent)
-                if (!ent.isRead) newInbox.add(ent)
-                if (uid > maxUid) maxUid = uid
-            }
-            lastSeenUid[acc.email] = maxUid
+            val fresh = runCatching { uidFolder.getMessagesByUID((seen0 ?: 0L) + 1, UIDFolder.LASTUID) }.getOrNull()
+            if (fresh != null) newInbox += insertNew(ctx, acc, db, uidFolder, fresh)
         }
         runCatching { if (inbox.isOpen) inbox.close(false) }
 
@@ -215,6 +205,70 @@ object MailService {
             }
         } else sentScanCounter[acc.email] = n
         return newInbox
+    }
+
+    /** 增量入库：把 UID 大于基线且库里没有的邮件插入，返回新邮件并推进基线(轮询与推送线程共用，幂等) */
+    private suspend fun insertNew(ctx: Context, acc: Account, db: AppDatabase,
+                                  uidFolder: UIDFolder, msgs: Array<out Message>): List<MailMessage> {
+        val out = mutableListOf<MailMessage>()
+        val seen = lastSeenUid[acc.email] ?: 0L
+        var maxUid = seen
+        for (m in msgs) {
+            if (m == null || m.isExpunged) continue
+            val uid = uidFolder.getUID(m)
+            if (uid > maxUid) maxUid = uid
+            if (uid <= seen) continue
+            if (db.messages().byUid(acc.id, "INBOX", uid.toString()) != null) continue
+            val ent = toEntity(acc.id, "INBOX", uid.toString(), m, ctx)
+            db.messages().insert(ent)
+            if (!ent.isRead) out.add(ent)
+        }
+        if (maxUid > (lastSeenUid[acc.email] ?: 0L)) lastSeenUid[acc.email] = maxUid
+        return out
+    }
+
+    /* ---------- IMAP IDLE 推送(比轮询更快) ---------- */
+
+    // 推送版本号：IDLE 线程每收到新邮件就 +1，界面检测到变化立即刷新列表并回顶
+    @Volatile var pushVersion = 0
+    private val pushStarted = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /** 为每个账号启动 IMAP IDLE 长连接推送线程：服务器一有新邮件毫秒级主动通知。
+     *  这是对齐 QQ 邮箱体验的关键：不等轮询，服务器主动推，APP 立刻入库+弹通知+刷新界面。
+     *  轮询同步继续保留作为兑底(网络抖动/IDLE 断开时自动重连重推)。 */
+    fun startPush(ctx: Context, acc: Account, db: AppDatabase) {
+        if (pushStarted.containsKey(acc.email)) return
+        pushStarted[acc.email] = true
+        Thread {
+            var backoff = 2000L
+            while (true) {
+                try {
+                    kotlinx.coroutines.runBlocking {
+                        // 先建立 UID 基线，避免 IDLE 首轮全量拉取
+                        runCatching { syncAccount(ctx, acc, db) }
+                        val store = connectImap(acc)
+                        val f = store.getFolder("INBOX") as com.sun.mail.imap.IMAPFolder
+                        if (!f.isOpen) f.open(Folder.READ_ONLY)
+                        while (f.isOpen) {
+                            try {
+                                f.idle() // 阻塞直到服务器推送(新邮件/状态变化)或心跳返回，几乎零延迟
+                            } catch (e: Exception) { break }
+                            runCatching {
+                                val fresh = f.getMessagesByUID((lastSeenUid[acc.email] ?: 0L) + 1, UIDFolder.LASTUID)
+                                val newOnes = insertNew(ctx, acc, db, f, fresh)
+                                newOnes.filter { it.folder == "INBOX" }
+                                    .forEach { SyncWorker.notifyNew(ctx, it.accountId, it) }
+                                if (newOnes.isNotEmpty()) pushVersion++
+                            }
+                        }
+                        runCatching { store.close() }
+                    }
+                } catch (t: Throwable) { }
+                // 断线后自动重连(退避，最长 60 秒一次；正常情况下连接一直活着感知不到这里)
+                try { Thread.sleep(backoff) } catch (e: InterruptedException) { return@Thread }
+                backoff = minOf(backoff * 2, 60000)
+            }
+        }.apply { isDaemon = true; name = "cloudmail-idle-${acc.email}" }.start()
     }
 
     private fun toEntity(accId: Long, folder: String, uid: String, m: Message, ctx: Context): MailMessage {
