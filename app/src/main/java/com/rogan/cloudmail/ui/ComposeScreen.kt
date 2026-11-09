@@ -34,6 +34,7 @@ import androidx.navigation.NavHostController
 import com.rogan.cloudmail.data.*
 import com.rogan.cloudmail.mail.SendWorker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.*
@@ -185,29 +186,35 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     val hasContent = toRows.any { it.isNotBlank() } || cc.text.isNotBlank() || bcc.text.isNotBlank() ||
             subject.text.isNotBlank() || blocks.any { it !is BodyBlock.T || it.tv.text.isNotBlank() } || atts.isNotEmpty()
 
-    // 是否弹「保存草稿」提醒：只有用户手动输入过内容，或从空白页输入了任何内容才提醒；
-    // 从联系人/转发带入的自动内容不提醒；已保存草稿未再编辑也不重复提醒
-    val shouldAskSave = userEdited || (hasContent && draftId <= 0 && presetTo.isBlank() && forwardId <= 0)
+    // 自动保存产生的草稿 id：首次自动保存创建草稿行后记下来，后续都更新这一行，避免重复插入多份草稿
+    var autosaveDraftId by remember { mutableStateOf(-1L) }
+    var savedOnExit by remember { mutableStateOf(false) }
+
+    // 是否弹「保存草稿」提醒：只有用户亲手输入过内容才算：
+    // - 从联系人选的收件人 / 切换发件账号 / 打开已有草稿未再编辑：都不提醒，直接返回
+    // - 正文内容全部删空后返回：不算输入过内容，不提醒
+    // - 手动输入的收件人/主题/正文/附件/录音：提醒(防误丢内容)
+    val shouldAskSave = userEdited && hasContent
 
     fun saveDraftNow(): Long = kotlinx.coroutines.runBlocking {
         if (!loadedDraft || !hasContent) return@runBlocking -1L
         try {
             val bodyHtml = blocksToHtml()
-            if (draftId > 0) {
-                db.outbox().byId(draftId)?.let { o ->
-                    db.outbox().update(o.copy(
-                        accountId = sendAccId,
-                        toAddr = toRows.map { it.trim() }.filter { it.isNotBlank() }.joinToString(","),
-                        ccAddr = cc.text.trim(), bccAddr = bcc.text.trim(),
-                        subject = subject.text, bodyHtml = bodyHtml,
-                        attachmentsJson = atts.joinToString(",", "[", "]") { it.toJson() },
-                        readReceipt = readReceipt, cardMode = cardMode,
-                        status = if (o.status == "FAILED" || o.status == "SENDING") "DRAFT" else o.status,
-                        scheduledAt = o.scheduledAt, error = "", updatedAt = System.currentTimeMillis()))
-                }
-                draftId
+            val effId = if (draftId > 0) draftId else autosaveDraftId
+            val existing = if (effId > 0) db.outbox().byId(effId) else null
+            if (existing != null) {
+                db.outbox().update(existing.copy(
+                    accountId = sendAccId,
+                    toAddr = toRows.map { it.trim() }.filter { it.isNotBlank() }.joinToString(","),
+                    ccAddr = cc.text.trim(), bccAddr = bcc.text.trim(),
+                    subject = subject.text, bodyHtml = bodyHtml,
+                    attachmentsJson = atts.joinToString(",", "[", "]") { it.toJson() },
+                    readReceipt = readReceipt, cardMode = cardMode,
+                    status = if (existing.status == "FAILED" || existing.status == "SENDING") "DRAFT" else existing.status,
+                    scheduledAt = existing.scheduledAt, error = "", updatedAt = System.currentTimeMillis()))
+                effId
             } else {
-                db.outbox().insert(OutboxItem(
+                val newId = db.outbox().insert(OutboxItem(
                     accountId = sendAccId,
                     toAddr = toRows.map { it.trim() }.filter { it.isNotBlank() }.joinToString(","),
                     ccAddr = cc.text.trim(), bccAddr = bcc.text.trim(),
@@ -215,12 +222,38 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     attachmentsJson = atts.joinToString(",", "[", "]") { it.toJson() },
                     readReceipt = readReceipt, cardMode = cardMode,
                     scheduledAt = null, status = "DRAFT", updatedAt = System.currentTimeMillis()))
+                autosaveDraftId = newId
+                newId
             }
         } catch (e: Exception) { -1L }
     }
 
+    // 进程被清理也能保住内容：内容停止变化 1.5 秒后自动存入草稿库(后台被杀前已落库，
+    // 重新打开 APP 侧边栏「草稿/待发送」里原样保留，可继续编辑或直接发送)。未发送的邮件只要编辑过就一定会出现在草稿里。
+    LaunchedEffect(Unit) {
+        var lastSig = ""
+        androidx.compose.runtime.snapshotFlow {
+            buildString {
+                append(toRows.joinToString("|")); append('#')
+                append(cc.text); append('#'); append(bcc.text); append('#'); append(subject.text); append('#')
+                blocks.forEach { b -> when (b) {
+                    is BodyBlock.T -> { append('t'); append(b.tv.text); append('|') }
+                    is BodyBlock.Img -> { append('i'); append(b.att.path); append('|') }
+                    is BodyBlock.Lk -> { append('l'); append(b.url); append('|') }
+                } }
+                append('#'); atts.forEach { append(it.name); append('@'); append(it.path); append('|') }
+                append('#'); append(sendAccId); append('#'); append(readReceipt); append(cardMode)
+            }
+        }.collect { sig ->
+            if (loadedDraft && !savedOnExit && sig != lastSig && sig.isNotEmpty()) {
+                lastSig = sig
+                kotlinx.coroutines.delay(1500) // 停止输入 1.5 秒后落库，避免每敲一个字都写库
+                if (userEdited && hasContent && sendAccId > 0) runCatching { saveDraftNow() }
+            }
+        }
+    }
+
     // 离开页面/进程被回收前自动保存草稿，保证内容不丢
-    var savedOnExit by remember { mutableStateOf(false) }
     DisposableEffect(Unit) {
         onDispose {
             // 只有用户手动输入过内容才自动存草稿；从联系人/转发自动带入的内容不算，返回时不误存也不误弹
@@ -287,7 +320,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             recFile!!.copyTo(target, overwrite = true)
             atts = atts + AttInfo(name, target.absolutePath, "audio/mp4", false, "", dur = secs)
             userEdited = true
-            toast = "录音已添加(${mm}分${ss}秒，${fmtSize(target.length())})，点击可试听"
+            toast = "录音已添加(${mm}分${ss}秒，${fmtSize(target.length())})，点击即可试听"
         } else recFile?.delete()
         recFile = null
     }
@@ -316,8 +349,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         savedOnExit = true
         scope.launch(Dispatchers.IO) {
             val bodyHtml = blocksToHtml()
-            val item = if (draftId > 0 && db.outbox().byId(draftId) != null) {
-                db.outbox().byId(draftId)!!.copy(
+            // 发送前如果自动保存已经建过草稿行，直接更新那一行，避免草稿里残留一份重复的旧内容
+            val effId = if (draftId > 0) draftId else autosaveDraftId
+            val base = if (effId > 0) db.outbox().byId(effId) else null
+            val item = if (base != null) {
+                base.copy(
                     accountId = sendAccId, toAddr = finalTo, ccAddr = cc.text.trim(), bccAddr = bcc.text.trim(),
                     subject = subject.text, bodyHtml = bodyHtml,
                     attachmentsJson = atts.joinToString(",", "[", "]") { it.toJson() },
@@ -581,8 +617,23 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 } })
         }
 
-        // 附件/录音预览
+        // 附件/录音预览。录音/音频附件点击即直接播放(不再需要弹窗里再点一次「播放」)
         previewAtt?.let { a ->
+            val isAudio = a.mime.startsWith("audio/")
+            fun startPlay(p: AttInfo) {
+                runCatching {
+                    player?.release()
+                    player = MediaPlayer().apply {
+                        setAudioAttributes(AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                        setDataSource(p.path); prepare(); start()
+                        setOnCompletionListener { it.release(); player = null }
+                    }
+                }.onFailure { toast = "播放失败：${it.message}" }
+            }
+            // 「点击试听」一键出声：点列表里的录音立刻开始播放，弹窗里显示播放状态，可停止/重播
+            LaunchedEffect(a.path) { if (isAudio) startPlay(a) }
             AlertDialog(onDismissRequest = {
                 runCatching { player?.stop(); player?.release() }; player = null; previewAtt = null
             }, title = { Text(a.name, fontSize = 15.sp) },
@@ -592,7 +643,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             AsyncImage(model = File(a.path), contentDescription = null,
                                 modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp), contentScale = ContentScale.Fit)
                         } else {
-                            Text(if (a.mime.startsWith("audio/")) "点击下方「播放」试听录音" else "此类型暂不支持内嵌预览", fontSize = 13.sp)
+                            Text(when {
+                                isAudio && player != null -> "正在播放中…"
+                                isAudio -> "播放已结束，可点下方「重新播放」再听一次"
+                                else -> "此类型暂不支持内嵌预览"
+                            }, fontSize = 13.sp)
                         }
                         val sz = File(a.path).takeIf { it.exists() }?.length() ?: 0L
                         if (sz > 0) Text("大小：${fmtSize(sz)}${if (a.dur > 0) " · 时长 ${a.dur / 60}分${a.dur % 60}秒" else ""}",
@@ -601,17 +656,10 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 },
                 confirmButton = {
                     TextButton(onClick = {
-                        runCatching {
-                            player?.release()
-                            player = MediaPlayer().apply {
-                                setAudioAttributes(AudioAttributes.Builder()
-                                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
-                                setDataSource(a.path); prepare(); start()
-                                setOnCompletionListener { it.release(); player = null }
-                            }
-                        }.onFailure { toast = "播放失败：${it.message}" }
-                    }) { Text("播放") }
+                        if (player != null) {
+                            runCatching { player?.stop(); player?.release() }; player = null
+                        } else startPlay(a)
+                    }) { Text(if (player != null) "停止" else "重新播放") }
                 },
                 dismissButton = { TextButton(onClick = {
                     runCatching { player?.stop(); player?.release() }; player = null; previewAtt = null
@@ -718,7 +766,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             AlertDialog(
                 onDismissRequest = { showExit = false },
                 title = { Text("返回") },
-                text = { Text("你已输入内容，离开前要保存草稿吗？(草稿在侧边栏「草稿/待发送」中，随时可继续编辑发送)") },
+                text = { Text("你已输入内容，离开前要保存草稿吗？(草稿在侧边栏「草稿/待发送」中，随时可继续编辑发送；即使 APP 被清理后台，草稿也会自动保留)") },
                 confirmButton = {
                     TextButton(onClick = {
                         showExit = false; savedOnExit = true
