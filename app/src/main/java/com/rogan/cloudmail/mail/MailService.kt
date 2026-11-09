@@ -115,7 +115,8 @@ object MailService {
             bodyHtml = "", snippet = subject,
             isRead = runCatching { m.isSet(Flags.Flag.SEEN) }.getOrDefault(false),
             isStarred = false, isAd = ad, hasAttachments = false,
-            attachmentsJson = "[]", loaded = false
+            attachmentsJson = "[]", loaded = false,
+            size = runCatching { m.size.toLong() }.getOrDefault(0L)
         )
     }
 
@@ -144,6 +145,11 @@ object MailService {
             )
             db.messages().update(updated)
             f.close(false)
+            // 真实已读回执(MDN)：对方要求回执且这是收件时,回执一次
+            runCatching {
+                val rrt = m.getHeader("Disposition-Notification-To")?.firstOrNull()
+                if (!rrt.isNullOrBlank()) sendMdn(ctx, acc, msg, rrt)
+            }
             return updated
         }
     }
@@ -343,3 +349,66 @@ object MailService {
 }
 
 private typealias UIDFolder = com.sun.mail.imap.IMAPFolder
+
+    /** 真实发送 MDN 已读回执(按 RFC 2298) */
+    private fun sendMdn(ctx: Context, acc: Account, msg: MailMessage, rrt: String) {
+        runCatching {
+            val session = Session.getInstance(smtpProps(acc))
+            val mdn = MimeMessage(session)
+            mdn.setFrom(InternetAddress(acc.email, acc.nickname.ifBlank { acc.email }))
+            mdn.setRecipient(Message.RecipientType.TO, InternetAddress(rrt.trim()))
+            mdn.subject = "已读：${msg.subject.ifBlank { "(无主题)" }}"
+            mdn.setHeader("Content-Type", "multipart/report; report-type=disposition-notification")
+            val mp = MimeMultipart("report")
+            val notif = MimeBodyPart()
+            notif.setContent(
+                "Reporting-UA: CloudMail/1.1\r\n" +
+                "Final-Recipient: rfc822; ${msg.toAddr}\r\n" +
+                "Original-Message-ID: <${msg.messageId}>\r\n" +
+                "Disposition: automatic-action/MDN-sent-automatically; displayed\r\n",
+                "text/plain; charset=utf-8")
+            mp.addBodyPart(notif)
+            val human = MimeBodyPart()
+            human.setText("${acc.nickname.ifBlank { acc.email }} 已阅读您的邮件《${msg.subject.ifBlank { "(无主题)" }}》。", "utf-8")
+            mp.addBodyPart(human)
+            mdn.setContent(mp)
+            Transport.send(mdn, acc.email, acc.password)
+        }
+    }
+
+    /** SMTP/网络错误转成用户能看懂的中文原因 */
+    fun smtpErrorText(e: Exception): String = when (e) {
+        is com.sun.mail.smtp.SMTPAddressFailedException ->
+            when {
+                e.returnCode == 550 && e.message?.contains("quotation") == true -> "对方邮箱不存在或已停用"
+                e.returnCode == 550 -> "对方服务器拒收(邮箱不存在/被拉黑/不收外部邮件)：${e.address ?: ""}"
+                e.returnCode == 552 -> "对方邮箱存储已满，无法投递"
+                e.returnCode == 551 -> "对方地址已变更，服务器拒绝接收"
+                e.returnCode == 553 -> "对方服务器拒绝，可能本方邮箱/域名被列入黑名单"
+                e.returnCode == 451 -> "对方服务器临时故障，请稍后重试"
+                else -> "对方服务器拒绝投递(${e.returnCode})：${e.message ?: ""}"
+            }
+        is com.sun.mail.smtp.SMTPSendFailedException ->
+            when (e.returnCode) {
+                550 -> "对方邮箱不存在或服务器拒收"
+                552 -> "对方邮箱存储已满"
+                553, 554 -> "服务器拒绝发送(可能邮箱/域名被限制)"
+                else -> "服务器返回错误(${e.returnCode})：${e.message ?: ""}"
+            }
+        is javax.mail.AuthenticationFailedException -> "邮箱登录失败：账号或授权码不正确(发送失败)"
+        is java.net.UnknownHostException -> "收件邮箱域名不存在(服务器地址无法解析)"
+        is java.net.ConnectException -> "无法连接对方服务器(网络或服务器不可用)"
+        is java.net.SocketTimeoutException -> "连接对方服务器超时，请稍后重试"
+        is javax.mail.SendFailedException -> {
+            val inv = e.invalidAddresses?.joinToString("、") { it.toString() } ?: ""
+            val vali = e.validSentAddresses?.joinToString("、") { it.toString() } ?: ""
+            buildString {
+                append("发送失败")
+                if (inv.isNotBlank()) append("，以下地址无效：$inv")
+                if (vali.isNotBlank()) append("，以下地址已成功送达：$vali")
+                append(e.message?.takeIf { it.isNotBlank() }?.let { "：${it.take(120)}" } ?: "")
+            }
+        }
+        is javax.mail.MessagingException -> "邮件发送失败：${e.message ?: "未知协议错误"}"
+        else -> "发送失败：${e.message ?: e.javaClass.simpleName}"
+    }
