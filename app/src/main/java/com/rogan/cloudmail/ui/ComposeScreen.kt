@@ -498,7 +498,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                                 val ins = "[${lt.text}]($u)"
                                 val pos = body.selection.end.coerceIn(0, body.text.length)
                                 body = TextFieldValue(body.text.substring(0, pos) + ins + body.text.substring(pos),
-                                    pos + ins.length)
+                                    androidx.compose.ui.text.TextRange(pos + ins.length))
                                 showLink = false
                             }
                         }
