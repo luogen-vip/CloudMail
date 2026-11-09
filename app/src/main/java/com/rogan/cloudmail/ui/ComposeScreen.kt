@@ -66,6 +66,9 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     var showAccMenu by remember { mutableStateOf(false) }
     var showContactMenu by remember { mutableStateOf(false) }
 
+    // 自动填入的收件人(联系人/草稿/转发/预置)：不算用户亲手输入的内容，返回时不应触发“保存草稿”提醒
+    val autoTo = remember { mutableStateListOf<String>() }
+    remember(presetTo) { if (presetTo.isNotBlank()) autoTo.add(presetTo); Unit }
     // 收件人：一行一个邮箱，发送时同时发给所有人
     val toRows = remember { mutableStateListOf(presetTo) }
 
@@ -109,6 +112,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 readReceipt = o.readReceipt; cardMode = o.cardMode; sendAccId = o.accountId
                 val rows = o.toAddr.split(",", ";", "，", "；").map { it.trim() }.filter { it.isNotBlank() }
                 toRows.clear(); toRows.addAll(rows.ifEmpty { listOf("") })
+                autoTo.clear(); autoTo.addAll(rows) // 草稿里带入的收件人同样不算手动输入
                 blocks.clear(); blocks.addAll(htmlToBlocks(o.bodyHtml, atts))
             }
         } else if (forwardId > 0) {
@@ -186,15 +190,25 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     val hasContent = toRows.any { it.isNotBlank() } || cc.text.isNotBlank() || bcc.text.isNotBlank() ||
             subject.text.isNotBlank() || blocks.any { it !is BodyBlock.T || it.tv.text.isNotBlank() } || atts.isNotEmpty()
 
+    // 用户亲手输入的内容(不含联系人/草稿/转发自动填入的收件人)：
+    // 输入后全部删空(正文/主题/收件人/附件/链接/图片)则视为没输入过内容：返回不弹「保存草稿」提醒、也不自动存草稿；
+    // 只有仍保留着至少一项手动输入的内容时才提醒/存草稿
+    val hasManualContent = cc.text.isNotBlank() || bcc.text.isNotBlank() ||
+            subject.text.isNotBlank() || blocks.any { it !is BodyBlock.T || it.tv.text.isNotBlank() } ||
+            atts.isNotEmpty() || toRows.any { r ->
+                val v = r.trim()
+                v.isNotBlank() && toRows.count { it.trim() == v } > autoTo.count { it.trim() == v }
+            }
+
     // 自动保存产生的草稿 id：首次自动保存创建草稿行后记下来，后续都更新这一行，避免重复插入多份草稿
     var autosaveDraftId by remember { mutableStateOf(-1L) }
     var savedOnExit by remember { mutableStateOf(false) }
 
-    // 是否弹「保存草稿」提醒：只有用户亲手输入过内容才算：
+    // 是否弹「保存草稿」提醒：只有用户亲手输入过且当前仍保留着内容才算：
     // - 从联系人选的收件人 / 切换发件账号 / 打开已有草稿未再编辑：都不提醒，直接返回
-    // - 正文内容全部删空后返回：不算输入过内容，不提醒
-    // - 手动输入的收件人/主题/正文/附件/录音：提醒(防误丢内容)
-    val shouldAskSave = userEdited && hasContent
+    // - 输入后全选删空再返回：不算输入过内容，不提醒
+    // - 手动输入的收件人/主题/正文/附件/录音仍保留着：提醒(防误丢内容)
+    val shouldAskSave = userEdited && hasManualContent
 
     fun saveDraftNow(): Long = kotlinx.coroutines.runBlocking {
         if (!loadedDraft || !hasContent) return@runBlocking -1L
@@ -248,7 +262,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             if (loadedDraft && !savedOnExit && sig != lastSig && sig.isNotEmpty()) {
                 lastSig = sig
                 kotlinx.coroutines.delay(1500) // 停止输入 1.5 秒后落库，避免每敲一个字都写库
-                if (userEdited && hasContent && sendAccId > 0) runCatching { saveDraftNow() }
+                if (userEdited && hasManualContent && sendAccId > 0) runCatching { saveDraftNow() }
             }
         }
     }
@@ -257,7 +271,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     DisposableEffect(Unit) {
         onDispose {
             // 只有用户手动输入过内容才自动存草稿；从联系人/转发自动带入的内容不算，返回时不误存也不误弹
-            if (!savedOnExit && loadedDraft && userEdited && hasContent && sendAccId > 0) saveDraftNow()
+            if (!savedOnExit && loadedDraft && userEdited && hasManualContent && sendAccId > 0) saveDraftNow()
             runCatching { player?.release() }
         }
     }
@@ -473,6 +487,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                                 modifier = Modifier.fillMaxWidth().clickable {
                                     val blankIdx = toRows.indexOfFirst { it.isBlank() }
                                     if (blankIdx >= 0) toRows[blankIdx] = c.email else toRows.add(c.email)
+                                    autoTo.add(c.email) // 从联系人选的不算手动输入
                                     showContactMenu = false
                                 }.padding(start = 56.dp, top = 6.dp, bottom = 6.dp))
                         }
