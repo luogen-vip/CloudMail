@@ -94,6 +94,8 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     val refresh = {
         scope.launch {
             accounts = db.accounts().all()
+            // 为每个账号启动 IMAP IDLE 推送线程：服务器主动推，新邮件毫秒级入库(比任何轮询都快)
+            accounts.forEach { com.rogan.cloudmail.mail.MailService.startPush(ctx, it, db) }
             unreadMap = accounts.associate { it.id to db.messages().unreadCount(it.id) }
             outboxCount = db.outbox().all().size
             if (folder.startsWith("account:") && accounts.none { it.id.toString() == folder.substringAfter(":") }) folder = "all"
@@ -174,11 +176,20 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
         Unit
     }
 
-    // APP 在前台时每 1 秒自动同步一次(静默)：别人发来的邮件几乎实时显示+弹通知，对齐 QQ 邮箱
+    // 前台保底同步 + 推送感知：IDLE 推送线程收到新邮件后入库并递增 pushVersion，
+    // 这里检测到变化立即刷新列表+回顶(总延迟≈服务器推送+毫秒级入库，接近 QQ 邮箱体验)。
+    // 500ms 轮询作为兑底(IDLE 断线重连期间仍能收到邮件)。
     LaunchedEffect(accounts.isNotEmpty()) {
+        var lastPush = -1
         while (accounts.isNotEmpty()) {
-            kotlinx.coroutines.delay(1_000)
-            doSync(false)
+            kotlinx.coroutines.delay(500)
+            val pv = com.rogan.cloudmail.mail.MailService.pushVersion
+            if (pv != lastPush) {
+                lastPush = pv
+                refresh(); reloadKey++; scrollNonce++
+            } else {
+                doSync(false)
+            }
         }
     }
 
@@ -493,7 +504,15 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                     onClick = {
                                         if (selectionMode) {
                                             toggleSelect(m.id, !isSel)
-                                        } else nav.navigate("detail/${m.id}")
+                                        } else {
+                                            // 点开即立刻置为已读：先更新本行(蓝点瞬间消失)并同步落库，
+                                            // 再进详情；即使马上返回也不会因协程被取消而漏写已读
+                                            if (!m.isRead) {
+                                                msgs = msgs.map { if (it.id == m.id) it.copy(isRead = true) else it }
+                                                runCatching { kotlinx.coroutines.runBlocking { db.messages().setRead(m.id, true) } }
+                                            }
+                                            nav.navigate("detail/${m.id}")
+                                        }
                                     },
                                     onLongClick = { selectionMode = true; selected = selected + m.id })
                                 .padding(horizontal = if (selectionMode) 4.dp else 14.dp, vertical = 10.dp)) {
