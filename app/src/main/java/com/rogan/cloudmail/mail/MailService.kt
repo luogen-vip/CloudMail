@@ -163,8 +163,8 @@ object MailService {
         val inbox = store.getFolder("INBOX")
         if (!inbox.isOpen) inbox.open(Folder.READ_ONLY)
         val uidFolder = inbox as UIDFolder
-        val seen = lastSeenUid[acc.email]
-        if (seen == null) {
+        val seen0 = lastSeenUid[acc.email]
+        if (seen0 == null) {
             // 首次(每次启动后第一轮)：扫描最近 50 封建立基线，同时把库里缺的补进来
             var maxUid = 0L
             for (m in inbox.messages.toList().takeLast(50)) {
@@ -178,6 +178,7 @@ object MailService {
             }
             lastSeenUid[acc.email] = maxUid
         } else {
+            val seen = seen0
             // 之后每一轮：只拉基线 UID 之后的新邮件(通常 0 封，一次轻量查询，亚秒级完成)
             val fresh = runCatching { uidFolder.getMessagesByUID(seen + 1, UIDFolder.LASTUID) }.getOrNull()
             var maxUid = seen
