@@ -89,6 +89,7 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     var reloadKey by remember { mutableStateOf(0) }
     var syncMsg by remember { mutableStateOf<String?>(null) }
     var lastAutoSync by remember { mutableStateOf(0L) }
+    var lastRefreshAt by remember { mutableStateOf(0L) }
     var manualSync by remember { mutableStateOf(false) } // 只有手动点刷新才显示顶部进度条
     // 粘性的“首次同步未完成”状态：首次登录同步期间空文件夹连续显示“正在同步”，
     // 不再在两轮同步间隙闪“暂无邮件”；同步完成(或超时兑底)后才显示真实的空状态文案
@@ -244,7 +245,12 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                     lastAutoSync = System.currentTimeMillis()
                     doSync(false)
                 }
-                refresh()
+                // 刷新节流(1 秒)：从详情页返回时立即全量刷新会引发重组风暴，
+                // 是“返回后点击下一封邮件第一下没反应”的推手之一；轮询本身已保证数据实时，这里只做兑底
+                if (System.currentTimeMillis() - lastRefreshAt > 1_000) {
+                    lastRefreshAt = System.currentTimeMillis()
+                    refresh()
+                }
             }
         }
         life.lifecycle.addObserver(obs)
@@ -492,6 +498,10 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     // 系统返回键：多选模式下先退出多选，而不是退出 APP
     androidx.activity.compose.BackHandler(enabled = selectionMode) { exitSelection() }
 
+    // 点击防抖：连续快速点两下/两行时只在第一次导航，避免重复压栈详情页；
+    // 也不会因连点而吞掉后续点击
+    var lastNavClick by remember { mutableStateOf(0L) }
+
     val deleteIds = { ids: Set<Long>, forever: Boolean ->
         scope.launch {
             ids.forEach { id ->
@@ -589,6 +599,9 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                         if (selectionMode) {
                                             toggleSelect(m.id, !isSel)
                                         } else {
+                                            val now = System.currentTimeMillis()
+                                            if (now - lastNavClick < 700) return@combinedClickable
+                                            lastNavClick = now
                                             // 点开即立刻置为已读：先更新本行(蓝点瞬间消失)并同步落库，
                                             // 再进详情；即使马上返回也不会因协程被取消而漏写已读
                                             if (!m.isRead) {
@@ -622,6 +635,9 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                         if (m.isAd) Text("广告", fontSize = 10.sp, color = Color.White,
                                             modifier = Modifier.background(Color(0xFFEF6C00), MaterialTheme.shapes.small).padding(horizontal = 4.dp, vertical = 1.dp))
+                                        // 退信邮件红色徽标：一眼看出这封信是系统退信(发送未真正送达)，不是普通新邮件
+                                        if (isBounceMail(m.fromAddr, m.subject)) Text("退信", fontSize = 10.sp, color = Color.White,
+                                            modifier = Modifier.background(Color(0xFFD32F2F), MaterialTheme.shapes.small).padding(horizontal = 4.dp, vertical = 1.dp))
                                         if (m.hasAttachments) Icon(Icons.Default.AttachFile, null, Modifier.size(14.dp),
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                         if (m.isStarred) Icon(Icons.Default.Star, null, Modifier.size(14.dp), tint = Color(0xFFFBC02D))
