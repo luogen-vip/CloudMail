@@ -151,12 +151,16 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
                     syncing = false
                     manualSync = false
+                    val wasEmpty = dbEmpty
+                    val firstDone = !initialSyncDone
                     initialSyncDone = true
                     refresh()
-                    // 每轮同步结束后都重建列表：首次登录时首轮同步可能没拉到未读邮件，
-                    // 之前“没有新邮件就不刷新”会导致列表一直停在“暂无邮件”，切个文件夹才出来
-                    reloadKey++
-                    if (newMails.isNotEmpty()) scrollNonce++
+                    // 按需重建列表：首次同步完成/数据库从空变非空/手动刷新/有新邮件才重建；
+                    // 之前“每轮都重建”导致列表每秒重组一次，滑动顿一下没反应
+                    if (showBar || newMails.isNotEmpty() || firstDone || (wasEmpty && !dbEmpty)) {
+                        reloadKey++
+                        if (newMails.isNotEmpty()) scrollNonce++
+                    }
                     if (showBar) {
                         // 手动刷新一定给结果反馈
                         syncMsg = if (newMails.isEmpty()) "已刷新，暂无新邮件" else "已刷新，收到 ${newMails.size} 封新邮件"
@@ -190,17 +194,20 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     }
 
     // 前台保底同步 + 推送感知：IDLE 推送线程收到新邮件后入库并递增 pushVersion，
-    // 这里检测到变化立即刷新列表+回顶(总延迟≈服务器推送+毫秒级入库，接近 QQ 邮箱体验)。
-    // 500ms 轮询作为兑底(IDLE 断线重连期间仍能收到邮件)。
+    // 这里检测到变化立即刷新列表+回顶(接近 QQ 邮箱体验)。
+    // 轮询兑底降频到每 3 秒一次(推送已经在毫秒级收信，高频轮询只会争抢 IMAP 连接和刷新列表，
+    // 造成滑动顿住/正文加载等待)，pushVersion 检查仍保持 500ms
     LaunchedEffect(accounts.isNotEmpty()) {
         var lastPush = -1
+        var lastSyncAt = 0L
         while (accounts.isNotEmpty()) {
             kotlinx.coroutines.delay(500)
             val pv = com.rogan.cloudmail.mail.MailService.pushVersion
             if (pv != lastPush) {
                 lastPush = pv
                 refresh(); reloadKey++; scrollNonce++
-            } else {
+            } else if (System.currentTimeMillis() - lastSyncAt > 3000) {
+                lastSyncAt = System.currentTimeMillis()
                 doSync(false)
             }
         }
