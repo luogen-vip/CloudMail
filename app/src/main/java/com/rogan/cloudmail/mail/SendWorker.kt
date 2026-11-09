@@ -1,14 +1,8 @@
 package com.rogan.cloudmail.mail
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
-import com.rogan.cloudmail.MainActivity
 import com.rogan.cloudmail.data.*
 import java.util.Calendar
 
@@ -20,14 +14,27 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val itemId = inputData.getLong("itemId", -1)
         if (itemId <= 0) return Result.success()
         val item = db.outbox().byId(itemId) ?: return Result.success()
-        val acc = db.accounts().byId(item.accountId) ?: return Result.failure()
+        val acc = db.accounts().byId(item.accountId) ?: run {
+            AppNotify.sendFail(applicationContext, item.subject, "发件账号不存在，可能已被删除")
+            return Result.failure()
+        }
 
-        // 发送中状态
+        // 发送中状态(通知栏可见)
         db.outbox().update(item.copy(status = "SENDING", error = "", updatedAt = System.currentTimeMillis()))
+        AppNotify.sending(applicationContext, item.subject)
 
         return try {
-            val atts = AttInfo.fromJson(item.attachmentsJson)
+            val atts = AttInfo.fromJson(item.attachmentsJson).toMutableList()
             val cardHtml = if (item.cardMode) cardBlock(acc) else ""
+            // 名片头像作为内联图片(带 Content-ID)发送，对方客户端才能显示头像
+            if (item.cardMode && acc.avatarPath != null && java.io.File(acc.avatarPath).exists()) {
+                val f = java.io.File(acc.avatarPath)
+                val mime = when (f.extension.lowercase()) {
+                    "png" -> "image/png"; "webp" -> "image/webp"; "bmp" -> "image/bmp"; else -> "image/jpeg"
+                }
+                if (atts.none { it.cid == CARD_AVATAR_CID })
+                    atts.add(AttInfo("avatar.${f.extension.ifBlank { "jpg" }}", f.absolutePath, mime, true, CARD_AVATAR_CID))
+            }
             val mid = MailService.sendMail(acc, MailService.SendRequest(
                 to = item.toAddr.split(",", ";", "，", "；").map { it.trim() }.filter { it.isNotBlank() },
                 cc = item.ccAddr.split(",", ";", "，", "；").map { it.trim() }.filter { it.isNotBlank() },
@@ -48,65 +55,58 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 bodyHtml = item.bodyHtml + cardHtml,
                 snippet = item.subject, isRead = true, isStarred = false, isAd = false,
                 hasAttachments = atts.isNotEmpty(),
-                attachmentsJson = item.attachmentsJson, loaded = true
+                attachmentsJson = atts.joinToString(",", "[", "]") { it.toJson() }, loaded = true
             ))
             db.outbox().delete(itemId)
-            notifyResult(applicationContext, "邮件发送成功", "《${item.subject.ifBlank { "(无主题)" }}》已成功发送到对方服务器", silent = true)
+            AppNotify.sendOk(applicationContext, item.subject)
             Result.success()
         } catch (e: Exception) {
             // 真实失败原因(分类为可读中文)
             val reason = MailService.smtpErrorText(e)
             db.outbox().update(item.copy(status = "FAILED", error = reason, scheduledAt = null, updatedAt = System.currentTimeMillis()))
-            notifyResult(applicationContext, "邮件发送失败", "《${item.subject.ifBlank { "(无主题)" }}》：$reason", silent = false)
+            AppNotify.sendFail(applicationContext, item.subject, reason)
             Result.failure()
-        }
-    }
-
-    private fun notifyResult(ctx: Context, title: String, text: String, silent: Boolean) {
-        runCatching {
-            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            if (android.os.Build.VERSION.SDK_INT >= 26)
-                nm.createNotificationChannel(NotificationChannel("send_result", "发送状态",
-                    if (silent) NotificationManager.IMPORTANCE_LOW else NotificationManager.IMPORTANCE_DEFAULT))
-            val open = Intent(ctx, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            val pi = PendingIntent.getActivity(ctx, 9001, open,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            val b = androidx.core.app.NotificationCompat.Builder(ctx, "send_result")
-                .setSmallIcon(com.rogan.cloudmail.R.drawable.ic_launcher)
-                .setContentTitle(title).setContentText(text)
-                .setStyle(androidx.core.app.NotificationCompat.BigTextStyle().bigText(text))
-                .setAutoCancel(true).setContentIntent(pi)
-                .setSilent(silent)
-            nm.notify(9100, b.build())
         }
     }
 
     companion object {
         const val CHANNEL = "send"
+        const val CARD_AVATAR_CID = "cloudmail_vcard_avatar"
 
-        /** 名片(资料卡) HTML 块 */
+        /**
+         * 名片(资料卡) HTML 块：头像 + 姓名，邮箱另起一行，每个字段一行；
+         * 头像用 cid 引用内联图片(发送时作为内联附件)，未设置头像时显示首字圆标
+         */
         fun cardBlock(acc: Account): String {
             val v = VCard.fromJson(acc.vcard)
+            val name = v.name.ifBlank { acc.nickname }
             val rows = buildList {
-                if (v.phone.isNotBlank()) add("📞 电话：${v.phone}")
-                if (v.org.isNotBlank()) add("🏢 单位：${v.org}")
-                if (v.title.isNotBlank()) add("💼 职务：${v.title}")
-                if (v.address.isNotBlank()) add("📍 地址：${v.address}")
-                if (v.note.isNotBlank()) add("📝 备注：${v.note}")
+                if (v.phone.isNotBlank()) add("电话：${v.phone}")
+                if (v.org.isNotBlank()) add("单位：${v.org}")
+                if (v.title.isNotBlank()) add("职务：${v.title}")
+                if (v.address.isNotBlank()) add("地址：${v.address}")
+                if (v.note.isNotBlank()) add("备注：${v.note}")
             }
-            if (rows.isEmpty() && v.name.isBlank()) return ""
-            val avatar = acc.avatarPath?.let {
-                "<img src=\"file://$it\" width=\"56\" height=\"56\" style=\"border-radius:28px;object-fit:cover\"/>"
-            } ?: "<div style=\"width:56px;height:56px;border-radius:28px;background:#1565C0;color:#fff;text-align:center;line-height:56px;font-size:24px\">${(v.name.ifBlank { acc.nickname }).take(1)}</div>"
+            if (rows.isEmpty() && name.isBlank()) return ""
+            val avatarFile = acc.avatarPath?.let { java.io.File(it) }?.takeIf { it.exists() }
+            val avatarHtml = if (avatarFile != null) {
+                "<img src=\"cid:$CARD_AVATAR_CID\" width=\"64\" height=\"64\" alt=\"头像\" style=\"border-radius:32px\"/>"
+            } else {
+                "<div style=\"width:64px;height:64px;line-height:64px;text-align:center;background:#1565C0;color:#ffffff;font-size:28px;font-weight:bold;border-radius:32px;\">${name.take(1)}</div>"
+            }
+            val rowHtml = rows.joinToString("") {
+                "<div style=\"color:#555;font-size:13px;line-height:22px\">$it</div>"
+            }
             return """
-            <div style="margin-top:24px;border-top:1px solid #e0e0e0;padding-top:16px;font-family:sans-serif">
-              <div style="display:flex;align-items:center">${avatar}
-                <div style="margin-left:12px">
-                  <div style="font-size:16px;font-weight:bold;color:#333">${v.name.ifBlank { acc.nickname }}<span style="font-weight:normal;color:#888;font-size:13px">&nbsp;&lt;${acc.email}&gt;</span></div>
-                  ${rows.joinToString("<br/>") { "<span style=\"color:#666;font-size:13px\">$it</span>" }}
-                </div>
-              </div>
+            <div style="margin-top:24px;border-top:1px solid #e0e0e0;padding-top:14px;font-family:sans-serif">
+              <table style="border-collapse:collapse"><tr>
+                <td style="vertical-align:top;padding-right:12px">${avatarHtml}</td>
+                <td style="vertical-align:top">
+                  <div style="font-size:16px;font-weight:bold;color:#333;line-height:22px">${name}</div>
+                  <div style="color:#666;font-size:13px;line-height:22px">${acc.email}</div>
+                  ${rowHtml}
+                </td>
+              </tr></table>
             </div>
             """.trimIndent()
         }
