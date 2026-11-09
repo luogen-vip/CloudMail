@@ -134,10 +134,29 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         }, contentPadding = PaddingValues(4.dp)) { Text("加联系人", fontSize = 11.sp) }
                     }
                 }
-                // 抄送/收件人完整显示，不再截断
-                if (m.toAddr.isNotBlank() && m.folder != "SENT")
-                    Text("收件人：${m.toAddr}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (m.ccAddr.isNotBlank()) Text("抄送：${m.ccAddr}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // 收件人/抄送：默认折叠成一行，不挤占头部；点“展开”看完整收件人/抄送详情，
+                // 保证下方正文浏览区始终足够大
+                var headOpen by remember(m.id) { mutableStateOf(false) }
+                val hasToLine = m.toAddr.isNotBlank() && m.folder != "SENT"
+                val hasCcLine = m.ccAddr.isNotBlank()
+                if (hasToLine || hasCcLine) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            if (headOpen) {
+                                if (hasToLine) Text("收件人：${m.toAddr}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (hasCcLine) Text("抄送：${m.ccAddr}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            } else {
+                                Text(if (hasToLine) "收件人：${m.toAddr}" + (if (hasCcLine) " 等" else "") else "抄送：${m.ccAddr}",
+                                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        TextButton(onClick = { headOpen = !headOpen }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                            modifier = Modifier.height(28.dp)) {
+                            Text(if (headOpen) "收起 ▴" else "展开 ▾", fontSize = 11.sp)
+                        }
+                    }
+                }
                 if (m.isAd) Text("此邮件疑似广告邮件", fontSize = 11.sp, color = Color(0xFFEF6C00),
                     modifier = Modifier.padding(top = 2.dp))
                 // 退信提示
@@ -153,10 +172,18 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 }
             }
             HorizontalDivider()
-            // 说明：后台静默拉取正文，不显示来回走动的进度条(手动刷新时才有进度提示)
-            // 正文 WebView(占据剩余全部空间，滑动范围更大)
-            val html = remember(m.id, m.bodyHtml) { htmlForWebView(m) }
-            androidx.compose.ui.viewinterop.AndroidView(
+            // 加载中不显示“无正文内容”(避免误以为邮件没内容)：正文拉取完成前显示加载状态，
+            // 只有确实加载完且正文为空才显示“无正文内容”
+            val html = remember(m.id, m.bodyHtml, m.loaded) { htmlForWebView(m) }
+            if (!m.loaded || loading) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        androidx.compose.material3.CircularProgressIndicator(Modifier.size(36.dp), strokeWidth = 3.dp)
+                        Spacer(Modifier.height(12.dp))
+                        Text("正在加载邮件内容…", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            } else androidx.compose.ui.viewinterop.AndroidView(
                 factory = { viewCtx ->
                     android.webkit.WebView(viewCtx).apply {
                         settings.javaScriptEnabled = false
@@ -191,8 +218,6 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 update = { wv -> wv.loadDataWithBaseURL(null, html, "text/html", "utf-8", null) },
                 modifier = Modifier.fillMaxWidth().weight(1f)
             )
-            // 附件区
-            val atts = remember(m.attachmentsJson) { AttInfo.fromJson(m.attachmentsJson) }
             if (atts.isNotEmpty()) {
                 HorizontalDivider()
                 Column(Modifier.padding(12.dp)) {
@@ -355,8 +380,12 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
 private fun htmlForWebView(m: MailMessage): String {
     var html = m.bodyHtml.ifBlank { "<p style='color:#999'>(无正文内容)</p>" }
     AttInfo.fromJson(m.attachmentsJson).filter { it.isInline && it.cid.isNotBlank() }.forEach { a ->
-        html = html.replace("cid:${a.cid}", "file://${a.path}")
+        // 本地文件确实存在才替换，避免换成不存在的路径出现裂图
+        if (a.path.isNotBlank() && java.io.File(a.path).exists())
+            html = html.replace("cid:${a.cid}", "file://${a.path}")
     }
+    // 没有对应内联附件的 cid 图片(如名片头像丢失/历史数据)直接隐藏，避免出现裂图图标
+    html = html.replace(Regex("<img[^>]*src=[\\\\\"']cid:[^\\\\\"']*[\\\\\"'][^>]*>?"), "")
     return """
     <html><head><meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
