@@ -201,7 +201,11 @@ fun AddAccountScreen(nav: NavHostController) {
                     testing = false
                     msg = "授权未完成${err?.let { "：$it" } ?: ""}"
                 } else {
-                    val em = email_ ?: ""
+                    // 若授权结果里仍拿不到邮箱，回退使用页面已填写的 Outlook 地址
+                    val em = email_ ?: email.text.trim().takeIf {
+                        emailRegex.matches(it) && it.substringAfter('@').lowercase()
+                            .let { d -> d == "outlook.com" || d == "hotmail.com" || d == "live.com" }
+                    } ?: ""
                     val existed = withContext(Dispatchers.IO) { db.accounts().byEmail(em) }
                     if (existed != null || em.isBlank()) {
                         testing = false
@@ -271,10 +275,11 @@ fun OAuthDialog(onResult: (ok: Boolean, email: String?, token: String?, refresh:
                                         Thread {
                                             runCatching {
                                                 if (code.isNullOrBlank()) throw Exception(if (e2) "微软返回了错误，请重新授权" else "未获取到授权码，请重试")
-                                                val (token, refresh, expire) = MailService.msExchangeToken(code, verifier)
-                                                val em = jwtEmail(token) ?: throw Exception("无法从授权结果读取邮箱地址")
+                                                val t = MailService.msExchangeToken(code, verifier)
+                                                // 优先从 access_token(JWT) 解析邮箱；失败时回退到 id_token(微软在 id_token 里更可靠地返回 email/preferred_username)
+                                                val em = jwtEmail(t.access) ?: jwtEmail(t.idToken) ?: throw Exception("无法从授权结果读取邮箱地址；请在下方邮箱地址栏手动填写后重试")
                                                 android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                                    onResult(true, em, token, refresh, expire, null)
+                                                    onResult(true, em, t.access, t.refresh, t.expire, null)
                                                 }
                                             }.onFailure {
                                                 android.os.Handler(android.os.Looper.getMainLooper()).post {
