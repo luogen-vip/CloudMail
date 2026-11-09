@@ -168,8 +168,10 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 atts = atts + AttInfo(f.name, f.absolutePath, mime, true, cid)
                 // 图片插入正文标记：可剪切到正文任意位置，删除标记即从正文中移除
-                body = TextFieldValue(body.text + (if (body.text.isNotBlank()) "\n" else "") + "[图片:$cid]",
-                    TextFieldValue(body.text).selection.end + "[图片:$cid]".length + 1)
+                val pos = body.selection.end.coerceIn(0, body.text.length)
+                val marker = (if (body.text.isNotBlank()) "\n" else "") + "[图片:$cid]"
+                body = TextFieldValue(body.text.substring(0, pos) + marker + body.text.substring(pos),
+                    androidx.compose.ui.text.TextRange(pos + marker.length))
                 toast = "图片已插入正文(大小 ${fmtSize(size)})；标记 [图片:$cid] 可移动或删除"
             }
         } }
@@ -300,7 +302,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             AlertDialog(onDismissRequest = {},
                 title = { Text("正在录音…") },
                 text = { Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(String.format("%d:%02d", recSeconds / 60, recSeconds % 60), fontSize = 32.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Text("${recSeconds / 60}:${(recSeconds % 60).toString().padStart(2, '0')}", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     Text("录音时长实时计时，无上限", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } },
                 confirmButton = { TextButton(onClick = { stopRecording(true) }) { Text("保存") } },
@@ -494,7 +496,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             !okUrl -> linkErr = "链接地址无效：请输入可访问的网址(如 https://www.example.com)，不能是普通文字"
                             else -> {
                                 val ins = "[${lt.text}]($u)"
-                                val pos = body.selection.coerceIn(0, body.text.length)
+                                val pos = body.selection.end.coerceIn(0, body.text.length)
                                 body = TextFieldValue(body.text.substring(0, pos) + ins + body.text.substring(pos),
                                     pos + ins.length)
                                 showLink = false
@@ -578,7 +580,7 @@ private fun Stepper(label: String, value: Int, min: Int, max: Int, onChange: (In
         Text(label, fontSize = 14.sp, modifier = Modifier.width(52.dp))
         IconButton(onClick = { if (value > min) onChange(value - 1) }, modifier = Modifier.size(30.dp)) { Icon(Icons.Default.Remove, null, Modifier.size(18.dp)) }
         Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceVariant) {
-            Text(String.format("%02d", value), fontSize = 15.sp, fontWeight = FontWeight.Bold,
+            Text(value.toString().padStart(2, '0'), fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp))
         }
         IconButton(onClick = { if (value < max) onChange(value + 1) }, modifier = Modifier.size(30.dp)) { Icon(Icons.Default.Add, null, Modifier.size(18.dp)) }
@@ -598,8 +600,8 @@ private fun FieldRow(label: String, value: TextFieldValue, onChange: (TextFieldV
 }
 
 fun fmtSize(bytes: Long): String = when {
-    bytes >= 1024 * 1024 -> String.format("%.1f MB", bytes / 1024.0 / 1024.0)
-    bytes >= 1024 -> String.format("%.0f KB", bytes / 1024.0)
+    bytes >= 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
+    bytes >= 1024 -> String.format(java.util.Locale.US, "%.0f KB", bytes / 1024.0)
     else -> "$bytes B"
 }
 
