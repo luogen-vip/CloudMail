@@ -113,26 +113,29 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 val accs = if (folder.startsWith("account:"))
                     listOfNotNull(db.accounts().byId(folder.substringAfter(":").toLong()))
                 else db.accounts().all()
-                var total = 0
+                val newMails = mutableListOf<com.rogan.cloudmail.data.MailMessage>()
                 for (a in accs) runCatching {
-                    total += com.rogan.cloudmail.mail.MailService.syncAccount(ctx, a, db).size
+                    newMails += com.rogan.cloudmail.mail.MailService.syncAccount(ctx, a, db)
                 }
+                // 同步到的新邮件立即弹通知(与后台同步一致，不漏提醒)
+                newMails.filter { !it.isRead && it.folder == "INBOX" }
+                    .forEach { com.rogan.cloudmail.mail.SyncWorker.notifyNew(ctx, it.accountId, it) }
                 syncing = false
                 refresh()
                 reloadKey++
-                syncMsg = if (accs.isEmpty()) "还没有邮箱账号，请先添加"
-                    else if (total > 0) "同步完成：收到 $total 封新邮件" else "已是最新，没有新邮件"
+                // 只在有新邮件时提示，不再每次都弹「已是最新」
+                if (newMails.isNotEmpty()) syncMsg = "收到 ${newMails.size} 封新邮件"
             }
         }
         Unit
     }
 
-    // 回到前台/进入主页时自动同步(30秒节流)，保证新邮件马上可见
+    // 回到前台/进入主页时自动同步(8秒节流)，保证新邮件马上可见
     val life = androidx.compose.ui.platform.LocalLifecycleOwner.current
     DisposableEffect(life) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
             if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                if (System.currentTimeMillis() - lastAutoSync > 30_000) {
+                if (System.currentTimeMillis() - lastAutoSync > 8_000) {
                     lastAutoSync = System.currentTimeMillis()
                     doSync()
                 }
@@ -204,7 +207,7 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 TopAppBar(
                     title = { Text(folderTitle(folder)) },
                     actions = {
-                        IconButton(onClick = { syncing = true; doSync() }) {
+                        IconButton(onClick = { doSync() }) {
                             Icon(Icons.Default.Refresh, "同步/刷新收件(检查新邮件)")
                         }
                         IconButton(onClick = { showSortMenu = true }) { Icon(Icons.Default.Sort, "排序") }
@@ -317,6 +320,13 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     var showClearTrash by remember { mutableStateOf(false) }
     fun exitSelection() { selectionMode = false; selected = emptySet() }
 
+    // 系统返回键：多选模式下先退出多选，而不是退出 APP
+    androidx.activity.compose.BackHandler(enabled = selectionMode) { exitSelection() }
+
+    // 排序/刷新后回到列表顶部，保证正在看的邮件位置可预测
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(sortMode) { listState.scrollToItem(0) }
+
     val deleteIds = { ids: Set<Long>, forever: Boolean ->
         scope.launch {
             ids.forEach { id ->
@@ -346,8 +356,15 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                 }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
                     Text("全部标为已读", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                 }
-                if (folder == "trash") TextButton(onClick = { showClearTrash = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
-                    Text("清空回收站", fontSize = 12.sp, color = Color(0xFFEF6C00))
+                if (folder == "trash") {
+                    TextButton(onClick = {
+                        scope.launch { db.messages().restoreAllTrash(); refreshParent(); reload() }
+                    }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                        Text("还原全部", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                    }
+                    TextButton(onClick = { showClearTrash = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                        Text("清空回收站", fontSize = 12.sp, color = Color(0xFFEF6C00))
+                    }
                 }
             }
             if (selectionMode) {
@@ -358,6 +375,22 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                     TextButton(onClick = {
                         selected = if (selected.size == msgs.size) emptySet() else msgs.map { it.id }.toSet()
                     }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text(if (selected.size == msgs.size) "取消全选" else "全选", color = Color.White, fontSize = 12.sp) }
+                    if (folder == "starred") {
+                        TextButton(onClick = {
+                            scope.launch {
+                                selected.forEach { db.messages().setStar(it, false) }
+                                exitSelection(); refreshParent(); reload()
+                            }
+                        }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("取消星标", color = Color.White, fontSize = 12.sp) }
+                    }
+                    if (folder == "trash") {
+                        TextButton(onClick = {
+                            scope.launch {
+                                selected.forEach { db.messages().setFolder(it, "INBOX") }
+                                exitSelection(); refreshParent(); reload()
+                            }
+                        }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("还原", color = Color.White, fontSize = 12.sp) }
+                    }
                     TextButton(onClick = {
                         deleteIds(selected, folder == "trash")
                     }, contentPadding = PaddingValues(horizontal = 8.dp)) {
@@ -366,7 +399,7 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                     TextButton(onClick = { exitSelection() }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("取消", color = Color.White, fontSize = 12.sp) }
                 }
             }
-            LazyColumn {
+            LazyColumn(state = listState) {
                 items(msgs, key = { it.id }) { m ->
                     val contact = remember(m.id) { mutableStateOf<Contact?>(null) }
                     LaunchedEffect(m.fromAddr) { contact.value = db.contacts().byEmail(m.fromAddr) }
@@ -389,7 +422,12 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                     onLongClick = { selectionMode = true; selected = selected + m.id })
                                 .padding(horizontal = if (selectionMode) 4.dp else 14.dp, vertical = 10.dp)) {
                                 AvatarOf(shownName, null, 44.dp)
-                                Column(Modifier.weight(1f).padding(start = 10.dp)) {
+                                // 未读蓝点：一眼区分已读/未读(所有文件夹均生效)
+                                if (!m.isRead) Box(
+                                    Modifier.padding(end = 4.dp).size(10.dp)
+                                        .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                )
+                                Column(Modifier.weight(1f).padding(start = if (!m.isRead) 4.dp else 10.dp)) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(shownName, fontSize = 15.sp,
                                             fontWeight = if (!m.isRead) FontWeight.Bold else FontWeight.Normal,
