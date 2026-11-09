@@ -148,7 +148,7 @@ fun SearchScreen(nav: NavHostController) {
                         modifier = Modifier.clickable { nav.navigate("contactEdit/${c.id}") }
                     )
                 }
-                HorizontalDivider()
+                item { HorizontalDivider() }
             }
             if (msgs.isNotEmpty()) {
                 item { Text("邮件", fontSize = 14.sp, fontWeight = FontWeight.Bold,
