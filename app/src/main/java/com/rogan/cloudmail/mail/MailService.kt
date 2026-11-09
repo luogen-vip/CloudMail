@@ -346,9 +346,6 @@ object MailService {
             ok
         }
     }.getOrDefault(false)
-}
-
-private typealias UIDFolder = com.sun.mail.imap.IMAPFolder
 
     /** 真实发送 MDN 已读回执(按 RFC 2298) */
     private fun sendMdn(ctx: Context, acc: Account, msg: MailMessage, rrt: String) {
@@ -412,3 +409,6 @@ private typealias UIDFolder = com.sun.mail.imap.IMAPFolder
         is javax.mail.MessagingException -> "邮件发送失败：${e.message ?: "未知协议错误"}"
         else -> "发送失败：${e.message ?: e.javaClass.simpleName}"
     }
+}
+
+private typealias UIDFolder = com.sun.mail.imap.IMAPFolder
