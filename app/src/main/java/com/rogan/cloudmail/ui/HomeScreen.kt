@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -75,13 +76,15 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     val db = AppDatabase.get(ctx)
     val scope = rememberCoroutineScope()
     val drawer = rememberDrawerState(DrawerValue.Closed)
-    var folder by remember { mutableStateOf("all") } // all/unread/starred/sent/outbox/trash/account:ID
+    // folder/sortMode 用 rememberSaveable：进入详情页返回后仍保留当前文件夹(星标/未读/已发送/回收站)，不再重置回“全部邮件”
+    var folder by rememberSaveable { mutableStateOf("all") } // all/unread/starred/sent/outbox/trash/account:ID
     var accounts by remember { mutableStateOf<List<Account>>(emptyList()) }
     var unreadMap by remember { mutableStateOf<Map<Long, Int>>(emptyMap()) }
     var syncing by remember { mutableStateOf(false) }
     var outboxCount by remember { mutableStateOf(0) }
-    var sortMode by remember { mutableStateOf(0) }
+    var sortMode by rememberSaveable { mutableStateOf(0) }
     var sortNonce by remember { mutableStateOf(0) } // 每次点排序菜单都 +1：即使重复点同一排序也强制重排+回顶
+    var scrollNonce by remember { mutableStateOf(0) } // 有新邮件/手动刷新时 +1：列表强制跳回绝对顶部显示最新邮件
     var showSortMenu by remember { mutableStateOf(false) }
     var reloadKey by remember { mutableStateOf(0) }
     var syncMsg by remember { mutableStateOf<String?>(null) }
@@ -106,15 +109,19 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
         }
     }
 
-    // 系统返回键：侧边栏打开时先关闭侧边栏，而不是退出APP
+    // 系统返回键：侧边栏打开时先关闭侧边栏；在文件夹(星标/未读/已发送/草稿/回收站等)时先回“全部邮件”，而不是直接退出APP
     BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
+    BackHandler(enabled = !drawer.isOpen && folder != "all") { folder = "all"; reloadKey++; scrollNonce++ }
 
     // 真实立即同步：必须在 IO 线程执行 IMAP 网络请求(主线程会被系统拦截导致“刷新没反应”)
     // showBar=只有手动点刷新按钮才显示顶部进度条；后台自动同步静默进行，不打扰浏览
     val doSync = { showBar: Boolean ->
         if (!syncing && accounts.isNotEmpty()) {
             syncing = true
-            if (showBar) manualSync = true
+            if (showBar) {
+                manualSync = true
+                syncMsg = "正在刷新收件箱…" // 手动刷新立刻给出可见反馈，用户知道刷新已生效
+            }
             scope.launch(Dispatchers.IO) {
                 val accs = if (folder.startsWith("account:"))
                     listOfNotNull(db.accounts().byId(folder.substringAfter(":").toLong()))
@@ -130,13 +137,22 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                     syncing = false
                     manualSync = false
                     refresh()
-                    reloadKey++
-                    // 只在有新邮件时提示，不再每次都弹「已是最新」
-                    if (newMails.isNotEmpty()) syncMsg = "收到 ${newMails.size} 封新邮件"
+                    // 只有确实有变化时才重建列表：新邮件到达/手动刷新时回顶显示最新；静默无新邮件不打扰当前浏览位置
+                    if (showBar || newMails.isNotEmpty()) {
+                        reloadKey++
+                        if (newMails.isNotEmpty()) scrollNonce++
+                    }
+                    if (showBar) {
+                        // 手动刷新一定给结果反馈
+                        syncMsg = if (newMails.isEmpty()) "已刷新，暂无新邮件" else "已刷新，收到 ${newMails.size} 封新邮件"
+                    } else if (newMails.isNotEmpty()) {
+                        syncMsg = "收到 ${newMails.size} 封新邮件"
+                    }
                 }
             }
         } else if (showBar) {
             // 已有同步在进行：等它结束后立刻再补一次真实拉取，保证手动刷新一定拿到最新
+            syncMsg = "正在刷新收件箱…"
             scope.launch(Dispatchers.IO) {
                 while (syncing) kotlinx.coroutines.delay(200)
                 val nm = mutableListOf<com.rogan.cloudmail.data.MailMessage>()
@@ -148,8 +164,10 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 }
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
                     manualSync = false
-                    refresh(); reloadKey++
-                    if (nm.isNotEmpty()) syncMsg = "收到 ${nm.size} 封新邮件"
+                    refresh()
+                    reloadKey++
+                    if (nm.isNotEmpty()) scrollNonce++
+                    syncMsg = if (nm.isEmpty()) "已刷新，暂无新邮件" else "已刷新，收到 ${nm.size} 封新邮件"
                 }
             }
         }
@@ -276,7 +294,7 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                                 fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
                         }
                     }
-                    if (folder == "outbox") OutboxList(nav, refresh) else MessageList(nav, folder, refresh, sortMode, reloadKey, sortNonce)
+                    if (folder == "outbox") OutboxList(nav, refresh) else MessageList(nav, folder, refresh, sortMode, reloadKey, sortNonce, scrollNonce)
                 }
                 if (manualSync) LinearProgressIndicator(Modifier.fillMaxWidth())
                 syncMsg?.let { t ->
@@ -329,13 +347,13 @@ private fun folderTitle(f: String) = when {
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Unit,
-                sortMode: Int = 0, reloadKey: Int = 0, sortNonce: Int = 0) {
+                sortMode: Int = 0, reloadKey: Int = 0, sortNonce: Int = 0, scrollNonce: Int = 0) {
     val ctx = LocalContext.current
     val db = AppDatabase.get(ctx)
     var msgs by remember(folder) { mutableStateOf<List<MailMessage>>(emptyList()) }
     val scope = rememberCoroutineScope()
-    val reload = { scope.launch {
-        msgs = when {
+    suspend fun loadList(): List<MailMessage> = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val rows = when {
             folder == "all" -> db.messages().allMail()
             folder == "unread" -> db.messages().unread()
             folder == "starred" -> db.messages().starred()
@@ -344,14 +362,25 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             folder.startsWith("account:") -> db.messages().byAccount(folder.substringAfter(":").toLong())
             else -> db.messages().allMail()
         }
-        msgs = when (sortMode) {
-            1 -> msgs.sortedBy { it.date }
-            2 -> msgs.sortedByDescending { it.size }
-            3 -> msgs.sortedBy { it.size }
-            else -> msgs.sortedByDescending { it.date }
+        when (sortMode) {
+            1 -> rows.sortedBy { it.date }
+            2 -> rows.sortedByDescending { it.size }
+            3 -> rows.sortedBy { it.size }
+            else -> rows.sortedByDescending { it.date }
         }
-    }; Unit }
-    LaunchedEffect(folder, reloadKey, sortMode, sortNonce) { reload() }
+    }
+    // 供删除/标已读等操作后局部刷新列表(保持当前浏览位置，不强行回顶)
+    val reload = { scope.launch { msgs = loadList() }; Unit }
+
+    // 关键修复：加载数据和回顶放在同一个协程里顺序执行。
+    // 之前是两个独立的 LaunchedEffect，回顶在数据重排完成前就执行了(对着旧列表滑到顶部)，
+    // 导致偶发性“点了排序没回顶/还在排序前的位置”，看起来时灵时不灵。
+    // 现在每次触发(点排序/有新邮件/手动刷新/切文件夹)都 100% 先重排、再滑到绝对顶部。
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(folder, reloadKey, sortMode, sortNonce, scrollNonce) {
+        msgs = loadList()
+        listState.scrollToItem(0)
+    }
     val life = androidx.compose.ui.platform.LocalLifecycleOwner.current
     DisposableEffect(life, folder) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
@@ -375,10 +404,6 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
 
     // 系统返回键：多选模式下先退出多选，而不是退出 APP
     androidx.activity.compose.BackHandler(enabled = selectionMode) { exitSelection() }
-
-    // 排序/切换文件夹/刷新后强制回到列表绝对顶部(第 0 项)；sortNonce 保证重复点同一排序也回顶
-    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(sortMode, reloadKey, folder, sortNonce) { listState.scrollToItem(0) }
 
     val deleteIds = { ids: Set<Long>, forever: Boolean ->
         scope.launch {
