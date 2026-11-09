@@ -16,9 +16,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.FileProvider
 import androidx.navigation.NavHostController
-import coil.compose.AsyncImage
+import androidx.core.content.FileProvider
 import com.rogan.cloudmail.data.*
 import com.rogan.cloudmail.mail.MailService
 import kotlinx.coroutines.Dispatchers
@@ -35,21 +34,29 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
     var msg by remember { mutableStateOf<MailMessage?>(null) }
     var acc by remember { mutableStateOf<Account?>(null) }
     var loading by remember { mutableStateOf(true) }
-    var showImg by remember { mutableStateOf<String?>(null) }
     var toast by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmRecall by remember { mutableStateOf(false) }
+    var showImg by remember { mutableStateOf<File?>(null) }
+    var starBusy by remember { mutableStateOf(false) }
+    var showRemark by remember { mutableStateOf(false) }
+    var contact by remember { mutableStateOf<Contact?>(null) }
+    var m0 by remember { mutableStateOf<MailMessage?>(null) }
 
     LaunchedEffect(id) {
-        val m = db.messages().byId(id) ?: return@LaunchedEffect
+        val m = db.messages().byId(id)
+        m0 = m
+        if (m == null) { loading = false; return@LaunchedEffect }
         msg = m
         acc = db.accounts().byId(m.accountId)
-        if (!m.isRead) { m.isRead = true; db.messages().setRead(id, true) }
+        contact = db.contacts().byEmail(m.fromAddr)
+        if (!m.isRead) { db.messages().setRead(id, true) }
         if (!m.loaded && acc != null) {
             loading = true
             val loaded = withContext(Dispatchers.IO) { MailService.loadFull(ctx, acc!!, m, db) }
-            msg = loaded; loading = false
-        } else loading = false
+            msg = loaded
+        }
+        loading = false
     }
 
     val m = msg
@@ -61,10 +68,14 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 actions = {
                     if (m != null) {
                         IconButton(onClick = {
+                            if (starBusy) return@IconButton
+                            starBusy = true
+                            val nv = !m.isStarred
                             scope.launch {
-                                m.isStarred = !m.isStarred
-                                db.messages().setStar(m.id, m.isStarred)
-                                msg = m.copy()
+                                db.messages().setStar(m.id, nv)
+                                msg = m.copy(isStarred = nv)
+                                m0 = m0?.copy(isStarred = nv)
+                                starBusy = false
                             }
                         }) { Icon(if (m.isStarred) Icons.Default.Star else Icons.Default.StarBorder, "星标",
                             tint = if (m.isStarred) Color(0xFFFBC02D) else MaterialTheme.colorScheme.onSurface) }
@@ -74,6 +85,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 nav.navigate("composeTo/$to")
                             }
                         }) { Icon(Icons.Default.Reply, "回复") }
+                        IconButton(onClick = { nav.navigate("forward/${m.id}") }) { Icon(Icons.Default.Shortcut, "转发") }
                         if (m.folder == "SENT") {
                             IconButton(onClick = { confirmRecall = true }) { Icon(Icons.Default.Undo, "撤回") }
                         }
@@ -85,19 +97,27 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
     ) { pad ->
         if (m == null) { Box(Modifier.padding(pad).fillMaxSize()); return@Scaffold }
         Column(Modifier.padding(pad).fillMaxSize()) {
-            // 头部信息
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
-                Text(m.subject.ifBlank { "(无主题)" }, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
+            // 头部信息(紧凑)
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    val contact = remember(m.fromAddr) { mutableStateOf<Contact?>(null) }
-                    LaunchedEffect(m.fromAddr) { contact.value = db.contacts().byEmail(m.fromAddr) }
-                    AvatarOf(contact.value?.remark?.ifBlank { null } ?: m.fromName, null, 38.dp)
+                    Text(m.subject.ifBlank { "(无主题)" }, fontSize = 17.sp, fontWeight = FontWeight.Bold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    if (m.size > 0) Text(fmtSize(m.size), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AvatarOf(displayName(contact?.remark, m.fromAddr, m.fromName), null, 34.dp)
                     Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                        Text(displayName(contact.value?.remark, m.fromAddr, m.fromName), fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                        Text("<${m.fromAddr}>", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(displayName(contact?.remark, m.fromAddr, m.fromName) + " <" + m.fromAddr + ">",
+                            fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("${if (m.folder == "SENT") "发送至 " else ""}${m.toAddr}  ${fmtFull(m.date)}",
+                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (m.folder == "INBOX") {
+                        TextButton(onClick = { showRemark = true }, contentPadding = PaddingValues(4.dp)) {
+                            Text(if (contact?.remark.isNullOrBlank()) "备注" else "改备注", fontSize = 11.sp)
+                        }
                         OutlinedButton(onClick = {
                             scope.launch {
                                 val c = db.contacts().byEmail(m.fromAddr)
@@ -110,20 +130,29 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                     nav.navigate("contactEdit/$newId")
                                 }
                             }
-                        }) { Text("加联系人", fontSize = 12.sp) }
+                        }, contentPadding = PaddingValues(4.dp)) { Text("加联系人", fontSize = 11.sp) }
                     }
-                    Text(fmtFull(m.date), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (m.toAddr.isNotBlank()) Text("收件人：${m.toAddr}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (m.ccAddr.isNotBlank()) Text("抄送：${m.ccAddr}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (m.isAd) Text("此邮件疑似广告邮件", fontSize = 12.sp, color = Color(0xFFEF6C00),
-                    modifier = Modifier.padding(top = 4.dp))
+                if (m.ccAddr.isNotBlank()) Text("抄送：${m.ccAddr}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                if (m.isAd) Text("此邮件疑似广告邮件", fontSize = 11.sp, color = Color(0xFFEF6C00),
+                    modifier = Modifier.padding(top = 2.dp))
+                // 退信提示
+                val isBounce = m.fromAddr.contains("mailer-daemon", true) ||
+                        m.fromAddr.contains("postmaster", true) ||
+                        m.subject.contains("Undeliverable", true) ||
+                        m.subject.contains("退回", false) ||
+                        m.subject.contains("Mail Delivery", true)
+                if (isBounce) {
+                    Text("⚠ 这是退信通知：你之前发送的邮件未能成功送达对方服务器(可能对方邮箱不存在/已满/拒收)。详情见正文。",
+                        fontSize = 12.sp, color = Color(0xFFD32F2F), fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 4.dp))
+                }
             }
             HorizontalDivider()
             if (loading) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
-            // 正文 WebView
+            // 正文 WebView(占据剩余全部空间，滑动范围更大)
             val html = remember(m.id, m.bodyHtml) { htmlForWebView(m) }
             androidx.compose.ui.viewinterop.AndroidView(
                 factory = { viewCtx ->
@@ -163,49 +192,40 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 }, null, tint = MaterialTheme.colorScheme.primary)
                             Column(Modifier.weight(1f).padding(start = 10.dp)) {
                                 Text(a.name, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("${File(a.path).length() / 1024} KB · ${a.mime.substringAfter('/', "file")}",
+                                val sz = File(a.path).takeIf { it.exists() }?.length()
+                                Text("${sz?.let { fmtSize(it) } ?: "未知大小"} · ${a.mime.substringAfter('/', "file")}" +
+                                        if (a.dur > 0) " · 时长 ${a.dur / 60}分${a.dur % 60}秒" else "",
                                     fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            TextButton(onClick = {
-                                val f = File(a.path)
-                                if (f.exists()) {
-                                    if (a.mime.startsWith("image/")) showImg = a.path
-                                    else openWithProvider(ctx, f, a.mime, a.name)
-                                } else toast = "附件文件已不存在"
-                            }) { Text("打开") }
+                            TextButton(onClick = { openWithProvider(ctx, File(a.path), a.mime, a.name) }) { Text("打开", fontSize = 12.sp) }
                             TextButton(onClick = {
                                 scope.launch(Dispatchers.IO) {
-                                    val f = File(a.path)
-                                    if (f.exists()) {
-                                        val saved = saveToDownloads(f, a.name)
-                                        withContext(Dispatchers.Main) {
-                                            toast = "已保存到下载文件夹：${saved.name}"
-                                        }
-                                    } else toast = "附件文件已不存在"
+                                    val saved = saveToDownloads(File(a.path), File(a.path).name)
+                                    withContext(Dispatchers.Main) { toast = "已保存到下载文件夹：${saved.name}" }
                                 }
-                            }) { Text("保存") }
+                            }) { Text("保存", fontSize = 12.sp) }
                         }
                     }
                 }
             }
         }
-        // 图片大图预览
-        showImg?.let { path ->
-            androidx.compose.ui.window.Dialog(onDismissRequest = { showImg = null }) {
-                Column(Modifier.fillMaxWidth().padding(8.dp)) {
-                    AsyncImage(model = File(path), contentDescription = null,
-                        modifier = Modifier.fillMaxWidth())
-                    Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                        TextButton(onClick = {
-                            scope.launch(Dispatchers.IO) {
-                                val saved = saveToDownloads(File(path), File(path).name)
-                                withContext(Dispatchers.Main) { toast = "已保存到下载文件夹：${saved.name}" }
-                            }
-                        }) { Text("保存到相册/下载") }
-                        TextButton(onClick = { showImg = null }) { Text("关闭") }
-                    }
-                }
-            }
+        // 大图查看
+        showImg?.let { img ->
+            AlertDialog(onDismissRequest = { showImg = null },
+                title = { Text(img.name, fontSize = 15.sp) },
+                text = {
+                    coil.compose.AsyncImage(model = img, contentDescription = null,
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            val saved = saveToDownloads(File(img.path), img.name)
+                            withContext(Dispatchers.Main) { toast = "已保存到下载文件夹：${saved.name}" }
+                        }
+                    }) { Text("保存到相册/下载") }
+                },
+                dismissButton = { TextButton(onClick = { showImg = null }) { Text("关闭") } })
         }
         // 删除确认
         if (confirmDelete) {
@@ -264,6 +284,40 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 },
                 dismissButton = { TextButton(onClick = { confirmRecall = false }) { Text("取消") } }
             )
+        }
+        // 备注对话框：无需添加联系人也能备注/取消备注
+        if (showRemark) {
+            var remarkText by remember { mutableStateOf(contact?.remark ?: "") }
+            AlertDialog(onDismissRequest = { showRemark = false },
+                title = { Text("给 ${m.fromAddr} 备注") },
+                text = {
+                    Column {
+                        TextField(value = remarkText, onValueChange = { remarkText = it },
+                            placeholder = { Text("备注名(留空即取消备注，显示对方原名)") }, singleLine = true)
+                        Text("备注后，这位发件人在所有邮件列表(全部/未读/星标等)中都显示备注名。",
+                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showRemark = false
+                        scope.launch(Dispatchers.IO) {
+                            val c = db.contacts().byEmail(m.fromAddr)
+                            if (c != null) {
+                                db.contacts().update(c.copy(remark = remarkText.trim()))
+                            } else {
+                                db.contacts().insert(Contact(
+                                    email = m.fromAddr, remark = remarkText.trim(), phone = "", org = "", note = "",
+                                    isImportant = false, lastReceivedAt = m.date, createdAt = System.currentTimeMillis()))
+                            }
+                            withContext(Dispatchers.Main) {
+                                contact = db.contacts().byEmail(m.fromAddr)
+                                toast = if (remarkText.isBlank()) "已取消备注，恢复显示对方原名" else "备注成功：${remarkText.trim()}"
+                            }
+                        }
+                    }) { Text(if (remarkText.isBlank()) "取消备注" else "保存备注") }
+                },
+                dismissButton = { TextButton(onClick = { showRemark = false }) { Text("关闭") } })
         }
         toast?.let { t ->
             Snackbar(Modifier.padding(16.dp)) { Text(t) }
