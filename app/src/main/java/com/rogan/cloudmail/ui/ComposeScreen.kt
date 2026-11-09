@@ -2,17 +2,15 @@ package com.rogan.cloudmail.ui
 
 import android.Manifest
 import android.content.Context
+import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -21,11 +19,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -37,6 +37,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.*
+
+/* ================== 正文块模型 ==================
+   正文由「文本块 / 图片块 / 链接块」顺序组成：
+   - 图片块：正文里直接显示图片本身，点击可全屏预览或从正文删除
+   - 链接块：正文里显示蓝色高亮链接文字，点击可编辑或删除；发送时真实生成 <a> 标签
+   插入位置 = 当前光标所在文本块的光标处 */
+sealed class BodyBlock {
+    abstract val id: Long
+    data class T(override val id: Long, val tv: TextFieldValue) : BodyBlock()
+    data class Img(override val id: Long, val att: AttInfo) : BodyBlock()
+    data class Lk(override val id: Long, val txt: String, val url: String) : BodyBlock()
+}
+
+private var blockSeq = System.currentTimeMillis()
+private fun nextBlockId(): Long = ++blockSeq
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -50,12 +65,15 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     var showAccMenu by remember { mutableStateOf(false) }
     var showContactMenu by remember { mutableStateOf(false) }
 
-    var to by remember { mutableStateOf(TextFieldValue(presetTo)) }
+    // 收件人：一行一个邮箱，发送时同时发给所有人
+    val toRows = remember { mutableStateListOf(presetTo) }
+
     var cc by remember { mutableStateOf(TextFieldValue("")) }
     var bcc by remember { mutableStateOf(TextFieldValue("")) }
     var showCc by remember { mutableStateOf(false) }
     var subject by remember { mutableStateOf(TextFieldValue("")) }
-    var body by remember { mutableStateOf(TextFieldValue("")) }
+    val blocks = remember { mutableStateListOf<BodyBlock>(BodyBlock.T(nextBlockId(), TextFieldValue(""))) }
+    var focusBlockId by remember { mutableStateOf<Long?>(null) }
     var atts by remember { mutableStateOf(listOf<AttInfo>()) }
     var readReceipt by remember { mutableStateOf(false) }
     var cardMode by remember { mutableStateOf(false) }
@@ -70,6 +88,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     var recFile by remember { mutableStateOf<File?>(null) }
     var loadedDraft by remember { mutableStateOf(false) }
     var previewAtt by remember { mutableStateOf<AttInfo?>(null) }
+    var editImg by remember { mutableStateOf<BodyBlock.Img?>(null) }
+    var editLink by remember { mutableStateOf<BodyBlock.Lk?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
 
     LaunchedEffect(Unit) {
@@ -80,23 +100,18 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         cardMode = def?.cardDefault ?: false
         if (draftId > 0) {
             db.outbox().byId(draftId)?.let { o ->
-                to = TextFieldValue(o.toAddr); cc = TextFieldValue(o.ccAddr); bcc = TextFieldValue(o.bccAddr)
+                cc = TextFieldValue(o.ccAddr); bcc = TextFieldValue(o.bccAddr)
                 subject = TextFieldValue(o.subject)
-                body = TextFieldValue(htmlToPlain(o.bodyHtml))
                 atts = AttInfo.fromJson(o.attachmentsJson)
                 readReceipt = o.readReceipt; cardMode = o.cardMode; sendAccId = o.accountId
+                val rows = o.toAddr.split(",", ";", "，", "；").map { it.trim() }.filter { it.isNotBlank() }
+                toRows.clear(); toRows.addAll(rows.ifEmpty { listOf("") })
+                blocks.clear(); blocks.addAll(htmlToBlocks(o.bodyHtml, atts))
             }
         } else if (forwardId > 0) {
             // 转发：原样带入原邮件(可编辑主题/正文，附件同样带入)
             db.messages().byId(forwardId)?.let { m ->
                 subject = TextFieldValue("转发：" + m.subject.ifBlank { "(无主题)" })
-                val hdr = buildString {
-                    appendLine("---------- 转发的邮件 ----------")
-                    appendLine("发件人：${m.fromName.ifBlank { m.fromAddr }} <${m.fromAddr}>")
-                    if (m.toAddr.isNotBlank()) appendLine("收件人：${m.toAddr}")
-                    appendLine("日期：${fmtFull(m.date)}")
-                    appendLine()
-                }
                 if (!m.loaded) {
                     db.accounts().byId(m.accountId)?.let { a ->
                         runCatching { kotlinx.coroutines.withContext(Dispatchers.IO) {
@@ -104,8 +119,17 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     }
                 }
                 val fresh = db.messages().byId(forwardId) ?: m
-                body = TextFieldValue(hdr + htmlToPlain(fresh.bodyHtml))
                 atts = AttInfo.fromJson(fresh.attachmentsJson)
+                val hdrText = buildString {
+                    appendLine("---------- 转发的邮件 ----------")
+                    appendLine("发件人：${m.fromName.ifBlank { m.fromAddr }} <${m.fromAddr}>")
+                    if (m.toAddr.isNotBlank()) appendLine("收件人：${m.toAddr}")
+                    appendLine("日期：${fmtFull(m.date)}")
+                    appendLine()
+                }
+                blocks.clear()
+                blocks.add(BodyBlock.T(nextBlockId(), TextFieldValue(hdrText)))
+                blocks.addAll(htmlToBlocks(fresh.bodyHtml, atts))
             }
         }
         loadedDraft = true
@@ -117,20 +141,59 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         while (recording) { kotlinx.coroutines.delay(1000); recSeconds++ }
     }
 
-    val hasContent = to.text.isNotBlank() || cc.text.isNotBlank() || bcc.text.isNotBlank() ||
-            subject.text.isNotBlank() || body.text.isNotBlank() || atts.isNotEmpty()
-
     val acc = accounts.firstOrNull { it.id == sendAccId }
+
+    /* ---------- 正文块操作 ---------- */
+
+    /** 在光标处插入块：把焦点所在文本块在光标处拆开，中间插入新块 */
+    fun insertIntoBody(b: BodyBlock) {
+        val idx = blocks.indexOfFirst { it.id == focusBlockId && it is BodyBlock.T }
+        if (idx >= 0) {
+            val t = blocks[idx] as BodyBlock.T
+            val pos = t.tv.selection.end.coerceIn(0, t.tv.text.length)
+            val before = t.tv.text.substring(0, pos)
+            val after = t.tv.text.substring(pos)
+            blocks[idx] = BodyBlock.T(t.id, TextFieldValue(before))
+            blocks.add(idx + 1, b)
+            blocks.add(idx + 2, BodyBlock.T(nextBlockId(), TextFieldValue(after)))
+        } else {
+            val last = blocks.lastOrNull()
+            if (last is BodyBlock.T) blocks.add(blocks.size - 1, b)
+            else { blocks.add(BodyBlock.T(nextBlockId(), TextFieldValue(""))); blocks.add(b) }
+        }
+    }
+
+    fun removeImgBlock(b: BodyBlock.Img) {
+        blocks.remove(b)
+        atts = atts.filter { it.cid != b.att.cid }
+        // 若剩下的全是图片/链接块，补一个文本块方便继续输入
+        if (blocks.none { it is BodyBlock.T }) blocks.add(BodyBlock.T(nextBlockId(), TextFieldValue("")))
+    }
+
+    /** 全部块 → 发送用 HTML */
+    fun blocksToHtml(): String = blocks.mapNotNull { b ->
+        when (b) {
+            is BodyBlock.T -> if (b.tv.text.isBlank()) null else plainToHtml(b.tv.text)
+            is BodyBlock.Img -> "<img src=\"cid:${b.att.cid}\" style=\"max-width:96%;border-radius:8px\"/>"
+            is BodyBlock.Lk -> "<a href=\"${b.url}\">${escXml(b.txt)}</a>"
+        }
+    }.joinToString("<br/>")
+
+    val fileAtts = atts.filter { !it.isInline }
+    val hasContent = toRows.any { it.isNotBlank() } || cc.text.isNotBlank() || bcc.text.isNotBlank() ||
+            subject.text.isNotBlank() || blocks.any { it !is BodyBlock.T || it.tv.text.isNotBlank() } || atts.isNotEmpty()
 
     fun saveDraftNow(): Long = kotlinx.coroutines.runBlocking {
         if (!loadedDraft || !hasContent) return@runBlocking -1L
         try {
+            val bodyHtml = blocksToHtml()
             if (draftId > 0) {
                 db.outbox().byId(draftId)?.let { o ->
                     db.outbox().update(o.copy(
                         accountId = sendAccId,
-                        toAddr = to.text.trim(), ccAddr = cc.text.trim(), bccAddr = bcc.text.trim(),
-                        subject = subject.text, bodyHtml = plainToHtml(body.text),
+                        toAddr = toRows.map { it.trim() }.filter { it.isNotBlank() }.joinToString(","),
+                        ccAddr = cc.text.trim(), bccAddr = bcc.text.trim(),
+                        subject = subject.text, bodyHtml = bodyHtml,
                         attachmentsJson = atts.joinToString(",", "[", "]") { it.toJson() },
                         readReceipt = readReceipt, cardMode = cardMode,
                         status = if (o.status == "FAILED" || o.status == "SENDING") "DRAFT" else o.status,
@@ -140,8 +203,9 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             } else {
                 db.outbox().insert(OutboxItem(
                     accountId = sendAccId,
-                    toAddr = to.text.trim(), ccAddr = cc.text.trim(), bccAddr = bcc.text.trim(),
-                    subject = subject.text, bodyHtml = plainToHtml(body.text),
+                    toAddr = toRows.map { it.trim() }.filter { it.isNotBlank() }.joinToString(","),
+                    ccAddr = cc.text.trim(), bccAddr = bcc.text.trim(),
+                    subject = subject.text, bodyHtml = bodyHtml,
                     attachmentsJson = atts.joinToString(",", "[", "]") { it.toJson() },
                     readReceipt = readReceipt, cardMode = cardMode,
                     scheduledAt = null, status = "DRAFT", updatedAt = System.currentTimeMillis()))
@@ -166,13 +230,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             val cid = "img${System.currentTimeMillis()}"
             val size = f.length()
             kotlinx.coroutines.withContext(Dispatchers.Main) {
-                atts = atts + AttInfo(f.name, f.absolutePath, mime, true, cid)
-                // 图片插入正文标记：可剪切到正文任意位置，删除标记即从正文中移除
-                val pos = body.selection.end.coerceIn(0, body.text.length)
-                val marker = (if (body.text.isNotBlank()) "\n" else "") + "[图片:$cid]"
-                body = TextFieldValue(body.text.substring(0, pos) + marker + body.text.substring(pos),
-                    androidx.compose.ui.text.TextRange(pos + marker.length))
-                toast = "图片已插入正文(大小 ${fmtSize(size)})；标记 [图片:$cid] 可移动或删除"
+                val ai = AttInfo(f.name, f.absolutePath, mime, true, cid)
+                atts = atts + ai
+                // 图片直接显示到正文光标处
+                insertIntoBody(BodyBlock.Img(nextBlockId(), ai))
+                toast = "图片已插入正文(大小 ${fmtSize(size)})，点击图片可预览或删除"
             }
         } }
     }
@@ -183,7 +245,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             val size = f.length()
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 atts = atts + AttInfo(f.name, f.absolutePath, mime, false, "")
-                toast = "附件已添加(大小 ${fmtSize(size)})，附件作为文件发送"
+                toast = "附件已添加(大小 ${fmtSize(size)})，将作为文件发送"
             }
         } }
     }
@@ -222,12 +284,12 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
 
     fun removeAtt(a: AttInfo) {
         atts = atts - a
-        // 从正文中移除对应图片标记
-        body = TextFieldValue(body.text.replace("[图片:${a.cid}]", "").replace(Regex("\n{3,}"), "\n\n"))
+        // 从正文中移除对应图片块
+        blocks.removeAll { it is BodyBlock.Img && it.att.cid == a.cid }
     }
 
     fun doSend(scheduledAt: Long?) {
-        val rcpt = to.text.split(",", ";", "，", "；").map { it.trim() }.filter { it.isNotBlank() }
+        val rcpt = toRows.map { it.trim() }.filter { it.isNotBlank() }
         if (rcpt.isEmpty()) { toast = "请填写收件人邮箱"; return }
         val bad = rcpt.filter { !emailRegex.matches(it) }
         if (bad.isNotEmpty()) { toast = "这些不是有效的邮箱地址：${bad.joinToString("、")}，请检查后重试"; return }
@@ -243,7 +305,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         val finalTo = rcpt.joinToString(",")
         savedOnExit = true
         scope.launch(Dispatchers.IO) {
-            val bodyHtml = plainToHtml(body.text)
+            val bodyHtml = blocksToHtml()
             val item = if (draftId > 0 && db.outbox().byId(draftId) != null) {
                 db.outbox().byId(draftId)!!.copy(
                     accountId = sendAccId, toAddr = finalTo, ccAddr = cc.text.trim(), bccAddr = bcc.text.trim(),
@@ -273,7 +335,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             } else {
                 SendWorker.sendNow(ctx, itemId)
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    toast = "正在发送…成功或失败都会在通知栏提示"
+                    toast = "正在发送…成功或失败都会在通知栏提示(带提示音)"
                     kotlinx.coroutines.delay(800); nav.popBackStack()
                 }
             }
@@ -288,7 +350,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     if (hasContent) showExit = true else nav.popBackStack()
                 }) { Icon(Icons.Default.Close, "返回") } },
                 actions = {
-                    IconButton(onClick = { showLink = true }) { Icon(Icons.Default.Link, "插入链接") }
+                    IconButton(onClick = { showLink = true }) { Icon(Icons.Default.Link, "插入超链接(插到光标处)") }
                     IconButton(onClick = { if (recording) stopRecording(true) else micPerm.launch(Manifest.permission.RECORD_AUDIO) }) {
                         Icon(if (recording) Icons.Default.Stop else Icons.Default.Mic, "录音")
                     }
@@ -309,7 +371,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 dismissButton = { TextButton(onClick = { stopRecording(false) }) { Text("取消录音") } })
         }
         LazyColumn(Modifier.padding(pad).fillMaxSize().padding(horizontal = 14.dp)) {
-            // 发件账号选择：下拉选择所有已添加账号
+            // 发件账号选择
             item {
                 if (accounts.isEmpty()) {
                     Text("还没有添加邮箱账号，请先在侧边栏「添加邮箱账号」中添加",
@@ -328,34 +390,48 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                                 DropdownMenuItem(text = { Text("${a.nickname.ifBlank { a.email }}  <${a.email}>" + if (a.isDefault) " (主)" else "", fontSize = 13.sp) },
                                     onClick = { sendAccId = a.id; cardMode = a.cardDefault; showAccMenu = false })
                             }
-                            if (accounts.size == 1) DropdownMenuItem(text = { Text("只有 1 个账号，可在侧边栏添加更多", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }, onClick = {})
                         }
                     }
                     HorizontalDivider()
                 }
             }
+            // 收件人：一行一个邮箱，可添加/删除多行
             item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("收件人", fontSize = 14.sp, modifier = Modifier.width(56.dp))
-                    TextField(value = to, onValueChange = { to = it },
-                        placeholder = { Text("可填多个邮箱，逗号分隔", fontSize = 13.sp) },
-                        modifier = Modifier.weight(1f), singleLine = true,
-                        isError = to.text.split(",", ";", "，", "；").map { it.trim() }.any { it.isNotBlank() && !emailRegex.matches(it) },
-                        colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
-                    IconButton(onClick = { showContactMenu = !showContactMenu }) { Icon(Icons.Default.Contacts, "选择联系人") }
-                }
-                if (showContactMenu) {
-                    if (contacts.isEmpty()) Text("还没有联系人，可在「加联系人」或联系人页添加", fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 56.dp))
-                    contacts.take(10).forEach { c ->
-                        Text("· ${c.remark.ifBlank { c.email }} <${c.email}>", fontSize = 13.sp,
-                            modifier = Modifier.fillMaxWidth().clickable {
-                                val cur = to.text.trimEnd(',', '，')
-                                to = TextFieldValue(if (cur.isBlank()) c.email else "$cur,${c.email}")
-                                showContactMenu = false
-                            }.padding(start = 56.dp, top = 6.dp, bottom = 6.dp))
+                Column {
+                    toRows.forEachIndexed { i, _ ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (i == 0) "收件人" else "", fontSize = 14.sp, modifier = Modifier.width(56.dp))
+                            TextField(value = toRows[i], onValueChange = { toRows[i] = it },
+                                placeholder = { Text("输入邮箱地址", fontSize = 13.sp) },
+                                modifier = Modifier.weight(1f), singleLine = true,
+                                isError = toRows[i].isNotBlank() && !emailRegex.matches(toRows[i].trim()),
+                                colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
+                            if (toRows.size > 1) IconButton(onClick = { toRows.removeAt(i) }) {
+                                Icon(Icons.Default.RemoveCircleOutline, "删除此收件人", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                     }
-                    HorizontalDivider()
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { toRows.add("") }) {
+                            Icon(Icons.Default.Add, null, Modifier.size(16.dp)); Text(" 添加收件人", fontSize = 13.sp)
+                        }
+                        TextButton(onClick = { showContactMenu = !showContactMenu }) {
+                            Icon(Icons.Default.Contacts, null, Modifier.size(16.dp)); Text(" 从联系人选", fontSize = 13.sp)
+                        }
+                    }
+                    if (showContactMenu) {
+                        if (contacts.isEmpty()) Text("还没有联系人，可在「加联系人」或联系人页添加", fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 56.dp))
+                        contacts.take(10).forEach { c ->
+                            Text("· ${c.remark.ifBlank { c.email }} <${c.email}>", fontSize = 13.sp,
+                                modifier = Modifier.fillMaxWidth().clickable {
+                                    val blankIdx = toRows.indexOfFirst { it.isBlank() }
+                                    if (blankIdx >= 0) toRows[blankIdx] = c.email else toRows.add(c.email)
+                                    showContactMenu = false
+                                }.padding(start = 56.dp, top = 6.dp, bottom = 6.dp))
+                        }
+                        HorizontalDivider()
+                    }
                 }
             }
             item {
@@ -363,13 +439,13 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     TextButton(onClick = { showCc = !showCc }) { Text(if (showCc) "隐藏抄送/密送" else "抄送/密送", fontSize = 13.sp) }
                     Spacer(Modifier.weight(1f))
                     Text("已读回执", fontSize = 13.sp)
-                    Switch(checked = readReceipt, onCheckedChange = { readReceipt = it }, modifier = Modifier.scale(0.8f))
+                    Switch(checked = readReceipt, onCheckedChange = { readReceipt = it })
                     Text("名片", fontSize = 13.sp)
-                    Switch(checked = cardMode, onCheckedChange = { cardMode = it }, modifier = Modifier.scale(0.8f))
-                    TextButton(onClick = { showCardPreview = true }, contentPadding = PaddingValues(4.dp), modifier = Modifier.scale(0.85f)) { Text("预览", fontSize = 12.sp) }
+                    Switch(checked = cardMode, onCheckedChange = { cardMode = it })
+                    TextButton(onClick = { showCardPreview = true }, contentPadding = PaddingValues(4.dp)) { Text("预览", fontSize = 12.sp) }
                 }
-                Text("名片内容在「设置→点击邮箱账号→名片(资料卡)信息」中编辑；开启后随邮件一起发出，收件人可见",
-                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp))
+                Text("名片内容在「设置→点击邮箱账号→名片(资料卡)信息」中编辑", fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp))
             }
             if (showCc) {
                 item { FieldRow("抄送", cc, { cc = it }) }
@@ -382,27 +458,50 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
                 HorizontalDivider()
             }
-            item {
-                TextField(value = body, onValueChange = { body = it },
-                    placeholder = { Text("正文内容…（插入图片后会出现 [图片:xxx] 标记，代表图片在正文中的位置，可移动/删除）") },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
+            // 正文：块式编辑(文本/图片/链接)
+            items(blocks, key = { it.id }) { b ->
+                when (b) {
+                    is BodyBlock.T -> TextField(
+                        value = b.tv,
+                        onValueChange = { i -> val idx = blocks.indexOfFirst { it.id == b.id }; if (idx >= 0) blocks[idx] = BodyBlock.T(b.id, i) },
+                        placeholder = { Text("正文内容…", fontSize = 14.sp) },
+                        modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) focusBlockId = b.id },
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
+                    is BodyBlock.Img -> Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                        AsyncImage(model = File(b.att.path), contentDescription = b.att.name,
+                            modifier = Modifier.fillMaxWidth().clickable { editImg = b },
+                            contentScale = ContentScale.FillWidth)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("正文图片 · 点击预览", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { editImg = b }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) { Text("删除", fontSize = 12.sp, color = Color(0xFFEF6C00)) }
+                        }
+                    }
+                    is BodyBlock.Lk -> Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("🔗 ${b.txt}", color = Color(0xFF1565C0), fontSize = 15.sp,
+                            textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f).clickable { editLink = b })
+                        IconButton(onClick = { editLink = b }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Edit, "编辑链接", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        IconButton(onClick = { blocks.remove(b) }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Close, "删除链接", Modifier.size(16.dp), tint = Color(0xFFEF6C00))
+                        }
+                    }
+                }
             }
             item {
                 Row {
                     TextButton(onClick = { imagePick.launch("image/*") }) { Icon(Icons.Default.Image, null, Modifier.size(18.dp)); Text(" 图片") }
                     TextButton(onClick = { filePick.launch("*/*") }) { Icon(Icons.Default.AttachFile, null, Modifier.size(18.dp)); Text(" 文件") }
-                    Text("插入「图片」= 图片直接显示在正文中；插入「文件」= 作为附件文件发送", fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 14.dp))
                 }
             }
-            items(atts) { a ->
+            items(fileAtts) { a ->
                 Row(verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth().clickable { previewAtt = a }) {
                     Icon(
                         when {
-                            a.mime.startsWith("image/") -> Icons.Default.Image
                             a.mime.startsWith("video/") -> Icons.Default.PlayCircle
                             a.mime.startsWith("audio/") -> Icons.Default.Headphones
                             else -> Icons.Default.InsertDriveFile
@@ -411,7 +510,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         Text(a.name, fontSize = 13.sp, maxLines = 1)
                         val sz = File(a.path).takeIf { it.exists() }?.length() ?: 0L
                         Text(buildString {
-                            append(if (a.isInline) "内联图片(显示在正文中) · 点击预览" else "${a.mime} · 点击${if (a.mime.startsWith("audio/")) "试听" else "预览"}")
+                            append("点击${if (a.mime.startsWith("audio/")) "试听" else "预览"}")
                             if (sz > 0) append(" · ${fmtSize(sz)}")
                             if (a.dur > 0) append(" · 时长 ${a.dur / 60}分${a.dur % 60}秒")
                         }, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -422,7 +521,54 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             item { Spacer(Modifier.height(30.dp)) }
         }
 
-        // 附件/图片/录音预览
+        // 正文图片：全屏预览 / 删除
+        editImg?.let { b ->
+            AlertDialog(onDismissRequest = { editImg = null },
+                title = { Text(b.att.name, fontSize = 15.sp) },
+                text = {
+                    AsyncImage(model = File(b.att.path), contentDescription = null,
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp), contentScale = ContentScale.Fit)
+                },
+                confirmButton = { TextButton(onClick = { removeImgBlock(b); editImg = null; toast = "已从正文中删除这张图片" }) { Text("从正文删除", color = Color(0xFFEF6C00)) } },
+                dismissButton = { TextButton(onClick = { editImg = null }) { Text("关闭") } })
+        }
+
+        // 链接：编辑 / 删除
+        editLink?.let { lk ->
+            var lt by remember(lk.id) { mutableStateOf(TextFieldValue(lk.txt)) }
+            var lu by remember(lk.id) { mutableStateOf(TextFieldValue(lk.url)) }
+            var linkErr by remember { mutableStateOf<String?>(null) }
+            AlertDialog(onDismissRequest = { editLink = null },
+                title = { Text("编辑超链接") },
+                text = {
+                    Column {
+                        TextField(value = lt, onValueChange = { lt = it }, label = { Text("显示的文字") })
+                        TextField(value = lu, onValueChange = { lu = it }, label = { Text("链接地址") })
+                        linkErr?.let { Text(it, fontSize = 12.sp, color = Color(0xFFEF6C00)) }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val u = lu.text.trim()
+                        val okUrl = Regex("^https?://[A-Za-z0-9.-]+\\.[A-Za-z]{2,}.*$").matches(u)
+                        when {
+                            lt.text.isBlank() -> linkErr = "请填写要显示的文字"
+                            !okUrl -> linkErr = "链接地址无效：必须以 http:// 或 https:// 开头且域名可访问"
+                            else -> {
+                                val idx = blocks.indexOfFirst { it.id == lk.id }
+                                if (idx >= 0) blocks[idx] = BodyBlock.Lk(lk.id, lt.text.trim(), u)
+                                editLink = null
+                            }
+                        }
+                    }) { Text("保存") }
+                },
+                dismissButton = { Row {
+                    TextButton(onClick = { blocks.remove(lk); editLink = null; toast = "链接已删除" }) { Text("删除链接", color = Color(0xFFEF6C00)) }
+                    TextButton(onClick = { editLink = null }) { Text("关闭") }
+                } })
+        }
+
+        // 附件/录音预览
         previewAtt?.let { a ->
             AlertDialog(onDismissRequest = {
                 runCatching { player?.stop(); player?.release() }; player = null; previewAtt = null
@@ -433,7 +579,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             AsyncImage(model = File(a.path), contentDescription = null,
                                 modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp), contentScale = ContentScale.Fit)
                         } else {
-                            Text("点击下方按钮播放试听", fontSize = 13.sp)
+                            Text(if (a.mime.startsWith("audio/")) "点击下方「播放」试听录音" else "此类型暂不支持内嵌预览", fontSize = 13.sp)
                         }
                         val sz = File(a.path).takeIf { it.exists() }?.length() ?: 0L
                         if (sz > 0) Text("大小：${fmtSize(sz)}${if (a.dur > 0) " · 时长 ${a.dur / 60}分${a.dur % 60}秒" else ""}",
@@ -441,14 +587,18 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     }
                 },
                 confirmButton = {
-                    if (!a.mime.startsWith("image/")) TextButton(onClick = {
-                        runCatching { player?.release() }
-                        player = MediaPlayer().apply {
-                            setDataSource(a.path); prepare(); start()
-                            setOnCompletionListener { it.release(); player = null }
-                        }
+                    TextButton(onClick = {
+                        runCatching {
+                            player?.release()
+                            player = MediaPlayer().apply {
+                                setAudioAttributes(AudioAttributes.Builder()
+                                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                                setDataSource(a.path); prepare(); start()
+                                setOnCompletionListener { it.release(); player = null }
+                            }
+                        }.onFailure { toast = "播放失败：${it.message}" }
                     }) { Text("播放") }
-                    else {}
                 },
                 dismissButton = { TextButton(onClick = {
                     runCatching { player?.stop(); player?.release() }; player = null; previewAtt = null
@@ -457,6 +607,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
 
         // 名片预览
         if (showCardPreview && acc != null) {
+            val cardHtml = remember(acc.id, acc.vcard, acc.avatarPath) {
+                SendWorker.cardBlock(acc).replace(
+                    "cid:${SendWorker.CARD_AVATAR_CID}",
+                    acc.avatarPath?.let { "file://$it" } ?: "noavatar")
+            }
             AlertDialog(onDismissRequest = { showCardPreview = false },
                 title = { Text("名片预览(收件人将看到的效果)") },
                 text = {
@@ -464,7 +619,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         android.webkit.WebView(vctx).apply { settings.javaScriptEnabled = false }
                     }, update = { wv ->
                         wv.loadDataWithBaseURL(null,
-                            "<html><body style=\"font-family:sans-serif\">${SendWorker.cardBlock(acc)}</body></html>",
+                            "<html><body style=\"font-family:sans-serif\">$cardHtml</body></html>",
                             "text/html", "utf-8", null)
                     }, modifier = Modifier.fillMaxWidth().height(220.dp))
                 },
@@ -472,13 +627,14 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 dismissButton = { TextButton(onClick = { showCardPreview = false }) { Text("关闭") } })
         }
 
+        // 插入超链接(插到光标处)
         if (showLink) {
             var lt by remember { mutableStateOf(TextFieldValue("")) }
             var lu by remember { mutableStateOf(TextFieldValue("")) }
             var linkErr by remember { mutableStateOf<String?>(null) }
             AlertDialog(
                 onDismissRequest = { showLink = false },
-                title = { Text("插入链接文字") },
+                title = { Text("插入超链接") },
                 text = {
                     Column {
                         TextField(value = lt, onValueChange = { lt = it }, placeholder = { Text("显示的文字，如：点我打开") })
@@ -493,13 +649,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         when {
                             lt.text.isBlank() -> linkErr = "请填写要显示的文字"
                             !u.startsWith("http") -> linkErr = "链接地址无效：必须以 http:// 或 https:// 开头"
-                            !okUrl -> linkErr = "链接地址无效：请输入可访问的网址(如 https://www.example.com)，不能是普通文字"
+                            !okUrl -> linkErr = "链接地址无效：请输入可访问的网址(如 https://www.example.com)"
                             else -> {
-                                val ins = "[${lt.text}]($u)"
-                                val pos = body.selection.end.coerceIn(0, body.text.length)
-                                body = TextFieldValue(body.text.substring(0, pos) + ins + body.text.substring(pos),
-                                    androidx.compose.ui.text.TextRange(pos + ins.length))
+                                insertIntoBody(BodyBlock.Lk(nextBlockId(), lt.text.trim(), u))
                                 showLink = false
+                                toast = "链接已插入正文光标处，显示为蓝色高亮，点击可编辑或删除"
                             }
                         }
                     }) { Text("插入到光标位置") }
@@ -508,7 +662,6 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             )
         }
         if (showSchedule) {
-            // APP 风格的日期时间选择(月/日/时/分步进)，避免系统弹窗风格不搭
             val cal = Calendar.getInstance()
             var mo by remember { mutableStateOf(cal.get(Calendar.MONTH) + 1) }
             var dy by remember { mutableStateOf(cal.get(Calendar.DAY_OF_MONTH)) }
@@ -574,6 +727,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     }
 }
 
+fun escXml(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 @Composable
 private fun Stepper(label: String, value: Int, min: Int, max: Int, onChange: (Int) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -605,46 +760,51 @@ fun fmtSize(bytes: Long): String = when {
     else -> "$bytes B"
 }
 
-/** 纯文本 → HTML：转义、换行、[文字](链接)、自动高亮真实URL、内联图片标记 */
+/** 单段纯文本 → HTML：转义、换行、[文字](链接)、自动高亮真实URL */
 fun plainToHtml(plain: String): String {
-    val esc = plain.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    val esc = escXml(plain)
     val mdLink = Regex("\\[([^\\]]+)]\\((https?://[^)\\s]+)\\)")
-    val inlineImg = Regex("\\[图片:([A-Za-z0-9]+)\\]")
     val url = Regex("https?://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+")
-    var html = esc
-    // 内联图片标记 → cid 图片(与附件一一对应)
-    html = inlineImg.replace(html) { mr -> "<img src=\"cid:${mr.groupValues[1]}\" style=\"max-width:96%;border-radius:8px\"/>" }
-    html = mdLink.replace(html) { mr -> "<a href=\"${mr.groupValues[2]}\">${mr.groupValues[1]}</a>" }
+    var html = mdLink.replace(esc) { mr -> "<a href=\"${mr.groupValues[2]}\">${mr.groupValues[1]}</a>" }
     val parts = Regex("(<a href=\"[^\"]+\">[^<]*</a>)").split(html)
     val out = parts.joinToString("") { seg ->
         if (seg.startsWith("<a href=")) seg
         else url.replace(seg) { mr ->
             val u = mr.value.trimEnd('.', ',', ')', '，', '。')
-            if (isValidUrl(u)) "<a href=\"$u\">${u}</a>" else mr.value
+            "<a href=\"$u\">${u}</a>"
         }
     }
     return out.replace("\n", "<br/>")
 }
 
-/** 真实地址校验：必须能解析出合法域名(不是仅凭 https:// 前缀就高亮) */
-fun isValidUrl(u: String): Boolean {
-    return runCatching {
-        val uri = Uri.parse(u)
-        val host = uri.host ?: return false
-        host.contains('.') && !host.endsWith(".") && host.any { it.isLetterOrDigit() } &&
-                (host.endsWith(".com") || host.endsWith(".net") || host.endsWith(".org") ||
-                 host.endsWith(".cn") || host.endsWith(".io") || host.endsWith(".dev") ||
-                 host.endsWith(".edu") || host.endsWith(".gov") || host.endsWith(".info") ||
-                 host.endsWith(".me") || host.endsWith(".app") || host.contains(".com/") ||
-                 host.length > 4) && try {
-            java.net.InetAddress.getByName(host) != null
-        } catch (e: Exception) { false }
-    }.getOrDefault(false)
+/** HTML → 正文块列表：图片块(cid) / 链接块(a 标签) / 文本块 */
+fun htmlToBlocks(html: String, atts: List<AttInfo>): MutableList<BodyBlock> {
+    val out = mutableListOf<BodyBlock>()
+    val tagRe = Regex("<img src=\"cid:([^\"]+)\"[^>]*>|<a href=\"([^\"]+)\">([^<]*)</a>")
+    var last = 0
+    fun addText(seg: String) {
+        val plain = htmlToPlain(seg)
+        if (plain.isNotBlank()) out.add(BodyBlock.T(nextBlockId(), TextFieldValue(plain)))
+    }
+    for (mr in tagRe.findAll(html)) {
+        addText(html.substring(last, mr.range.first))
+        val cid = mr.groupValues[1]
+        if (cid.isNotBlank()) {
+            atts.firstOrNull { it.cid == cid }?.let { out.add(BodyBlock.Img(nextBlockId(), it)) }
+        } else {
+            out.add(BodyBlock.Lk(nextBlockId(),
+                mr.groupValues[3].replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">"),
+                mr.groupValues[2].replace("&amp;", "&")))
+        }
+        last = mr.range.last + 1
+    }
+    addText(html.substring(last))
+    if (out.isEmpty()) out.add(BodyBlock.T(nextBlockId(), TextFieldValue("")))
+    return out
 }
 
 fun htmlToPlain(html: String): String = html
-    .replace(Regex("<img src=\"cid:([A-Za-z0-9]+)\"[^>]*/>")) { "[图片:${it.groupValues[1]}]" }
-    .replace(Regex("<a href=\"([^\"]+)\">([^<]*)</a>")) { "[${it.groupValues[2]}](${it.groupValues[1]})" }
+    .replace(Regex("<img[^>]*>"), "")
     .replace("<br/>", "\n").replace(Regex("<[^>]+>"), "")
     .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ")
 
