@@ -145,10 +145,6 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
 
     val acc = accounts.firstOrNull { it.id == sendAccId }
 
-    // 是否弹「保存草稿」提醒：只有用户手动输入过内容，或从空白页输入了任何内容才提醒；
-    // 从联系人/转发带入的自动内容不提醒；已保存草稿未再编辑也不重复提醒
-    val shouldAskSave = userEdited || (hasContent && draftId <= 0 && presetTo.isBlank() && forwardId <= 0)
-
     /* ---------- 正文块操作 ---------- */
 
     /** 在光标处插入块：把焦点所在文本块在光标处拆开，中间插入新块 */
@@ -188,6 +184,10 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     val fileAtts = atts.filter { !it.isInline }
     val hasContent = toRows.any { it.isNotBlank() } || cc.text.isNotBlank() || bcc.text.isNotBlank() ||
             subject.text.isNotBlank() || blocks.any { it !is BodyBlock.T || it.tv.text.isNotBlank() } || atts.isNotEmpty()
+
+    // 是否弹「保存草稿」提醒：只有用户手动输入过内容，或从空白页输入了任何内容才提醒；
+    // 从联系人/转发带入的自动内容不提醒；已保存草稿未再编辑也不重复提醒
+    val shouldAskSave = userEdited || (hasContent && draftId <= 0 && presetTo.isBlank() && forwardId <= 0)
 
     fun saveDraftNow(): Long = kotlinx.coroutines.runBlocking {
         if (!loadedDraft || !hasContent) return@runBlocking -1L
