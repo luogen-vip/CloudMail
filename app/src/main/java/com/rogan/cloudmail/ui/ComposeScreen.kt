@@ -84,6 +84,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     var subject by remember { mutableStateOf(TextFieldValue("")) }
     val blocks = remember { mutableStateListOf<BodyBlock>(BodyBlock.T(nextBlockId(), TextFieldValue(""))) }
     var focusBlockId by remember { mutableStateOf<Long?>(null) }
+    // 实时记录真实光标位置(哪个文本块+第几个字)：每次输入/聚焦都更新。
+    // 之前只记 focusBlockId，点插入链接弹窗后焦点丢到弹窗上，插入位置回退逻辑可能算错，
+    // 导致链接插到离正文几行远的地方；记录真实光标后插入位置永远精确
+    var cursorBlockId by remember { mutableStateOf<Long?>(null) }
+    var cursorPos by remember { mutableStateOf(0) }
     var atts by remember { mutableStateOf(listOf<AttInfo>()) }
     var readReceipt by remember { mutableStateOf(false) }
     var cardMode by remember { mutableStateOf(false) }
@@ -158,21 +163,26 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
 
     /* ---------- 正文块操作 ---------- */
 
-    /** 在光标处插入块：把焦点所在文本块在光标处拆开，中间插入新块 */
+    /** 在光标处插入块：把光标所在文本块在光标处拆开，中间插入新块。
+     *  - 光标位置用实时记录的 cursorBlockId/cursorPos(精确到字)，不再依赖弹窗打开后已丢失的焦点状态
+     *  - 拆分后若光标后面只剩空白，不再生成空文本块(否则链接下面会多出几行空白) */
     fun insertIntoBody(b: BodyBlock) {
-        val idx = blocks.indexOfFirst { it.id == focusBlockId && it is BodyBlock.T }
+        val cid = cursorBlockId
+        val idx = if (cid != null) blocks.indexOfFirst { it.id == cid && it is BodyBlock.T } else -1
         if (idx >= 0) {
             val t = blocks[idx] as BodyBlock.T
-            val pos = t.tv.selection.end.coerceIn(0, t.tv.text.length)
+            val pos = cursorPos.coerceIn(0, t.tv.text.length)
             val before = t.tv.text.substring(0, pos)
             val after = t.tv.text.substring(pos)
             blocks[idx] = BodyBlock.T(t.id, TextFieldValue(before))
             blocks.add(idx + 1, b)
             blocks.add(idx + 2, BodyBlock.T(nextBlockId(), TextFieldValue(after)))
         } else {
-            val last = blocks.lastOrNull()
-            if (last is BodyBlock.T) blocks.add(blocks.size - 1, b)
-            else { blocks.add(BodyBlock.T(nextBlockId(), TextFieldValue(""))); blocks.add(b) }
+            // 找不到光标记录(如刚打开草稿还没点进正文)：插到最后一段非空正文紧后面，
+            // 保证链接紧贴正文内容，而不是隔着几行或落到正文前面
+            val lastIdx = blocks.indexOfLast { it is BodyBlock.T && it.tv.text.isNotBlank() }
+            if (lastIdx >= 0) blocks.add(lastIdx + 1, b)
+            else blocks.add(b)
         }
     }
 
@@ -584,8 +594,18 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 when (b) {
                     is BodyBlock.T -> TextField(
                         value = b.tv,
-                        onValueChange = { i -> val idx = blocks.indexOfFirst { it.id == b.id }; if (idx >= 0) blocks[idx] = BodyBlock.T(b.id, i); userEdited = true },
-                        placeholder = { Text("正文内容…", fontSize = 14.sp) },
+                        onValueChange = { i ->
+                            val idx = blocks.indexOfFirst { it.id == b.id }
+                            if (idx >= 0) blocks[idx] = BodyBlock.T(b.id, i)
+                            // 每次输入都记录真实光标位置：插入链接时永远精确落在这里
+                            cursorBlockId = b.id; cursorPos = i.selection.end
+                            userEdited = true
+                        },
+                        placeholder = {
+                            // 空占位文字只在唯一正文块显示：插入链接/图片后拆出的空块不再显示
+                            // “正文内容…”，避免看起来像链接下面又多了一个正文
+                            if (blocks.size == 1) Text("正文内容…", fontSize = 14.sp) else Spacer(Modifier.height(0.dp))
+                        },
                         // 所见即所得：正文里的 [文字](链接) 显示成蓝色下划线的「文字」(括号/地址不显示)，
                         // 发送时仍真实转成 <a> 超链接。光标/选区偏移在 MdLinkOffsetMap 中精确映射，编辑不受影响
                         visualTransformation = mdLinkVisual(),
@@ -593,7 +613,13 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             // 只有唯一正文块(空邮件初始)才撑满高度；链接/图片插入后拆出的相邻文本块保持紧凑，
                             // 视觉上仍是一个连续正文区，不再出现“两个大正文块”的观感
                             minHeight = if (blocks.size == 1) 180.dp else 40.dp)
-                            .onFocusChanged { if (it.isFocused) focusBlockId = b.id },
+                            .onFocusChanged {
+                                if (it.isFocused) {
+                                    focusBlockId = b.id
+                                    cursorBlockId = b.id
+                                    cursorPos = b.tv.selection.end
+                                }
+                            },
                         colors = TextFieldDefaults.colors(
                             focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
                             // 底部指示线透明：多块正文(草稿中的图片/链接)之间不再显示一条横线，视觉上就是一个连续的正文区
