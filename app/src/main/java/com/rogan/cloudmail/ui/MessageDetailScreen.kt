@@ -43,8 +43,9 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
     var contact by remember { mutableStateOf<Contact?>(null) }
     var m0 by remember { mutableStateOf<MailMessage?>(null) }
     var recallResult by remember { mutableStateOf<String?>(null) }
+    var loadKey by remember { mutableStateOf(0) } // 失败重试：+1 后重新拉取正文
 
-    LaunchedEffect(id) {
+    LaunchedEffect(id, loadKey) {
         val m = db.messages().byId(id)
         m0 = m
         if (m == null) { loading = false; return@LaunchedEffect }
@@ -175,12 +176,21 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
             // 加载中不显示“无正文内容”(避免误以为邮件没内容)：正文拉取完成前显示加载状态，
             // 只有确实加载完且正文为空才显示“无正文内容”
             val html = remember(m.id, m.bodyHtml, m.loaded) { htmlForWebView(m) }
-            if (!m.loaded || loading) {
+            if (loading) {
                 Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         androidx.compose.material3.CircularProgressIndicator(Modifier.size(36.dp), strokeWidth = 3.dp)
                         Spacer(Modifier.height(12.dp))
                         Text("正在加载邮件内容…", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            } else if (!m.loaded) {
+                // 拉取失败(网络抖动/连接被服务器断开)：给出明确状态和一键重试，不再无限转圈
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("正文加载失败，可能是网络波动", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(10.dp))
+                        Button(onClick = { loading = true; loadKey++ }) { Text("重新加载") }
                     }
                 }
             } else androidx.compose.ui.viewinterop.AndroidView(
