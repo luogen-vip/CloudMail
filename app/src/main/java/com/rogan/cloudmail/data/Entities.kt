@@ -19,7 +19,10 @@ data class Account(
     val avatarPath: String?,        // 自定义头像路径
     val isDefault: Boolean,         // 主邮箱(默认发信)
     val vcard: String,              // 名片 JSON
-    val cardDefault: Boolean        // 该账号发信默认带名片
+    val cardDefault: Boolean,       // 该账号发信默认带名片
+    val oauthToken: String = "",    // OAuth2 访问令牌(Outlook等)，空=密码登录
+    val oauthRefresh: String = "",  // OAuth2 刷新令牌
+    val oauthExpire: Long = 0       // 访问令牌过期时间(毫秒)
 )
 
 @Entity(tableName = "messages")
