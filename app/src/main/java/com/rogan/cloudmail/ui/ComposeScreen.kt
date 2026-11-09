@@ -25,12 +25,12 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextDecoration
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.OffsetMap
+import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -965,7 +965,7 @@ fun mdLinkVisual(): VisualTransformation = VisualTransformation { tfv ->
     }
     o2t[oi] = ti          // 原文末尾 → 显示末尾
     t2o[ti] = oi          // 显示末尾 → 原文末尾
-    val om = object : OffsetMap {
+    val om = object : OffsetMapping {
         override fun originalToTransformed(offset: Int): Int = o2t[offset.coerceIn(0, src.length)]
         override fun transformedToOriginal(offset: Int): Int = t2o[offset.coerceIn(0, ti)]
     }
