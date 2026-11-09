@@ -80,6 +80,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     var showCardPreview by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var showExit by remember { mutableStateOf(false) }
+    // 用户是否手动输入过内容(收件人/主题/正文/附件等)；从联系人点进去自动填入的不算，返回时不误弹保存提醒
+    var userEdited by remember { mutableStateOf(false) }
     var showLink by remember { mutableStateOf(false) }
     var showSchedule by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
@@ -142,6 +144,10 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     }
 
     val acc = accounts.firstOrNull { it.id == sendAccId }
+
+    // 是否弹「保存草稿」提醒：只有用户手动输入过内容，或从空白页输入了任何内容才提醒；
+    // 从联系人/转发带入的自动内容不提醒；已保存草稿未再编辑也不重复提醒
+    val shouldAskSave = userEdited || (hasContent && draftId <= 0 && presetTo.isBlank() && forwardId <= 0)
 
     /* ---------- 正文块操作 ---------- */
 
@@ -221,7 +227,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             runCatching { player?.release() }
         }
     }
-    BackHandler(enabled = hasContent) { showExit = true }
+    BackHandler(enabled = shouldAskSave) { showExit = true }
 
     val imagePick = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { u -> scope.launch(Dispatchers.IO) {
@@ -232,6 +238,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 val ai = AttInfo(f.name, f.absolutePath, mime, true, cid)
                 atts = atts + ai
+                userEdited = true
                 // 图片直接显示到正文光标处
                 insertIntoBody(BodyBlock.Img(nextBlockId(), ai))
                 toast = "图片已插入正文(大小 ${fmtSize(size)})，点击图片可预览或删除"
@@ -245,6 +252,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             val size = f.length()
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 atts = atts + AttInfo(f.name, f.absolutePath, mime, false, "")
+                userEdited = true
                 toast = "附件已添加(大小 ${fmtSize(size)})，将作为文件发送"
             }
         } }
@@ -277,6 +285,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             val target = File(ctx.filesDir, "rec_${System.currentTimeMillis()}.m4a")
             recFile!!.copyTo(target, overwrite = true)
             atts = atts + AttInfo(name, target.absolutePath, "audio/mp4", false, "", dur = secs)
+            userEdited = true
             toast = "录音已添加(${mm}分${ss}秒，${fmtSize(target.length())})，点击可试听"
         } else recFile?.delete()
         recFile = null
@@ -335,7 +344,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             } else {
                 SendWorker.sendNow(ctx, itemId)
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    toast = "正在发送…成功或失败都会在通知栏提示(带提示音)"
+                    toast = "正在发送，成功或失败将以提示音通知"
                     kotlinx.coroutines.delay(800); nav.popBackStack()
                 }
             }
@@ -347,7 +356,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             TopAppBar(
                 title = { Text("写邮件", fontSize = 18.sp) },
                 navigationIcon = { IconButton(onClick = {
-                    if (hasContent) showExit = true else nav.popBackStack()
+                    if (shouldAskSave) showExit = true else nav.popBackStack()
                 }) { Icon(Icons.Default.Close, "返回") } },
                 actions = {
                     IconButton(onClick = { showLink = true }) { Icon(Icons.Default.Link, "插入超链接(插到光标处)") }
@@ -401,7 +410,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     toRows.forEachIndexed { i, _ ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(if (i == 0) "收件人" else "", fontSize = 14.sp, modifier = Modifier.width(56.dp))
-                            TextField(value = toRows[i], onValueChange = { toRows[i] = it },
+                            TextField(value = toRows[i], onValueChange = { toRows[i] = it; userEdited = true },
                                 placeholder = { Text("输入邮箱地址", fontSize = 13.sp) },
                                 modifier = Modifier.weight(1f), singleLine = true,
                                 isError = toRows[i].isNotBlank() && !emailRegex.matches(toRows[i].trim()),
@@ -439,7 +448,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     TextButton(onClick = { showCc = !showCc }) { Text(if (showCc) "隐藏抄送/密送" else "抄送/密送", fontSize = 13.sp) }
                     Spacer(Modifier.weight(1f))
                     Text("已读回执", fontSize = 13.sp)
-                    Switch(checked = readReceipt, onCheckedChange = { readReceipt = it })
+                    Switch(checked = readReceipt, onCheckedChange = { readReceipt = it; userEdited = true })
                     Text("名片", fontSize = 13.sp)
                     Switch(checked = cardMode, onCheckedChange = { cardMode = it })
                     TextButton(onClick = { showCardPreview = true }, contentPadding = PaddingValues(4.dp)) { Text("预览", fontSize = 12.sp) }
@@ -448,24 +457,25 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp))
             }
             if (showCc) {
-                item { FieldRow("抄送", cc, { cc = it }) }
-                item { FieldRow("密送", bcc, { bcc = it }) }
+                item { FieldRow("抄送", cc, { cc = it; userEdited = true }) }
+                item { FieldRow("密送", bcc, { bcc = it; userEdited = true }) }
             }
             item {
-                TextField(value = subject, onValueChange = { subject = it },
+                TextField(value = subject, onValueChange = { subject = it; userEdited = true },
                     placeholder = { Text("主题") }, modifier = Modifier.fillMaxWidth(),
                     singleLine = true, colors = TextFieldDefaults.colors(
                         focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
                 HorizontalDivider()
             }
-            // 正文：块式编辑(文本/图片/链接)
+            // 正文：块式编辑(文本/图片/链接)；正文块默认更高，方便写长内容
             items(blocks, key = { it.id }) { b ->
                 when (b) {
                     is BodyBlock.T -> TextField(
                         value = b.tv,
-                        onValueChange = { i -> val idx = blocks.indexOfFirst { it.id == b.id }; if (idx >= 0) blocks[idx] = BodyBlock.T(b.id, i) },
+                        onValueChange = { i -> val idx = blocks.indexOfFirst { it.id == b.id }; if (idx >= 0) blocks[idx] = BodyBlock.T(b.id, i); userEdited = true },
                         placeholder = { Text("正文内容…", fontSize = 14.sp) },
-                        modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) focusBlockId = b.id },
+                        modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 180.dp)
+                            .onFocusChanged { if (it.isFocused) focusBlockId = b.id },
                         colors = TextFieldDefaults.colors(
                             focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
                     is BodyBlock.Img -> Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
@@ -491,12 +501,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     }
                 }
             }
-            item {
-                Row {
-                    TextButton(onClick = { imagePick.launch("image/*") }) { Icon(Icons.Default.Image, null, Modifier.size(18.dp)); Text(" 图片") }
-                    TextButton(onClick = { filePick.launch("*/*") }) { Icon(Icons.Default.AttachFile, null, Modifier.size(18.dp)); Text(" 文件") }
-                }
-            }
+            // 附件列表(在工具栏之前展示，工具栏下沉到底部，正文区域更大)
             items(fileAtts) { a ->
                 Row(verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth().clickable { previewAtt = a }) {
@@ -516,6 +521,13 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         }, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     TextButton(onClick = { removeAtt(a) }) { Text("移除", color = Color(0xFFEF6C00)) }
+                }
+            }
+            // 图片/文件按钮放在最后(靠下)，让正文输入区域更宽敞
+            item {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    TextButton(onClick = { imagePick.launch("image/*") }) { Icon(Icons.Default.Image, null, Modifier.size(18.dp)); Text(" 图片") }
+                    TextButton(onClick = { filePick.launch("*/*") }) { Icon(Icons.Default.AttachFile, null, Modifier.size(18.dp)); Text(" 文件") }
                 }
             }
             item { Spacer(Modifier.height(30.dp)) }
@@ -652,6 +664,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             !okUrl -> linkErr = "链接地址无效：请输入可访问的网址(如 https://www.example.com)"
                             else -> {
                                 insertIntoBody(BodyBlock.Lk(nextBlockId(), lt.text.trim(), u))
+                                userEdited = true
                                 showLink = false
                                 toast = "链接已插入正文光标处，显示为蓝色高亮，点击可编辑或删除"
                             }
