@@ -178,7 +178,7 @@ object MailService {
             }
             lastSeenUid[acc.email] = maxUid
         } else {
-            val seen = seen0
+            val seen: Long = seen0
             // 之后每一轮：只拉基线 UID 之后的新邮件(通常 0 封，一次轻量查询，亚秒级完成)
             val fresh = runCatching { uidFolder.getMessagesByUID(seen + 1, UIDFolder.LASTUID) }.getOrNull()
             var maxUid = seen
