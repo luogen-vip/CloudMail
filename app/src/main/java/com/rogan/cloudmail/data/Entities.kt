@@ -115,8 +115,6 @@ interface MessageDao {
     suspend fun byUid(acc: Long, folder: String, uid: String): MailMessage?
     @Query("SELECT COUNT(*) FROM messages WHERE accountId = :acc AND folder = 'INBOX' AND isRead = 0")
     suspend fun unreadCount(acc: Long): Int
-    @Query("SELECT COUNT(*) FROM messages")
-    suspend fun countAll(): Int
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insert(m: MailMessage): Long
     @Update suspend fun update(m: MailMessage)
     @Query("UPDATE messages SET isRead = :read WHERE id = :id") suspend fun setRead(id: Long, read: Boolean)
