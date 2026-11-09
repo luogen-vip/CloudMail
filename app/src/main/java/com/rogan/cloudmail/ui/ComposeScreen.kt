@@ -170,11 +170,32 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         }
     }
 
+    /** 删除图片/链接块后把正文重新合并成一个连续输入区：
+     *  相邻的文本块合二为一，多余的空文本块去掉，避免出现“两个正文内容中间一条线”。 */
+    fun normalizeBlocks() {
+        // 1) 合并相邻文本块
+        var i = 0
+        while (i < blocks.size - 1) {
+            val a = blocks[i]; val n = blocks[i + 1]
+            if (a is BodyBlock.T && n is BodyBlock.T) {
+                val merged = a.tv.text + n.tv.text
+                blocks[i] = BodyBlock.T(a.id, TextFieldValue(merged, androidx.compose.ui.text.TextRange(merged.length)))
+                blocks.removeAt(i + 1)
+            } else i++
+        }
+        // 2) 只剩图片/链接块时补一个文本块方便继续输入
+        if (blocks.none { it is BodyBlock.T }) blocks.add(BodyBlock.T(nextBlockId(), TextFieldValue("")))
+    }
+
     fun removeImgBlock(b: BodyBlock.Img) {
         blocks.remove(b)
         atts = atts.filter { it.cid != b.att.cid }
-        // 若剩下的全是图片/链接块，补一个文本块方便继续输入
-        if (blocks.none { it is BodyBlock.T }) blocks.add(BodyBlock.T(nextBlockId(), TextFieldValue("")))
+        normalizeBlocks()
+    }
+
+    fun removeLinkBlock(b: BodyBlock.Lk) {
+        blocks.remove(b)
+        normalizeBlocks()
     }
 
     /** 全部块 → 发送用 HTML */
@@ -341,11 +362,15 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
 
     fun removeAtt(a: AttInfo) {
         atts = atts - a
-        // 从正文中移除对应图片块
-        blocks.removeAll { it is BodyBlock.Img && it.att.cid == a.cid }
+        // 从正文中移除对应图片块，并把正文重新合并为一个连续输入区
+        val had = blocks.removeAll { it is BodyBlock.Img && it.att.cid == a.cid }
+        if (had) normalizeBlocks()
     }
 
+    var sending by remember { mutableStateOf(false) }
+
     fun doSend(scheduledAt: Long?) {
+        if (sending) return
         val rcpt = toRows.map { it.trim() }.filter { it.isNotBlank() }
         if (rcpt.isEmpty()) { toast = "请填写收件人邮箱"; return }
         val bad = rcpt.filter { !emailRegex.matches(it) }
@@ -360,8 +385,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         }
         if (sendAccId <= 0 || acc == null) { toast = "请先添加邮箱账号"; return }
         val finalTo = rcpt.joinToString(",")
+        // 立即给出“发送中”反馈(右上角转圈)，避免“点了发送没反应”；整个过程 try/catch，任何异常都会提示原因而不是默默无反应
+        sending = true
         savedOnExit = true
         scope.launch(Dispatchers.IO) {
+          try {
             val bodyHtml = blocksToHtml()
             // 发送前如果自动保存已经建过草稿行，直接更新那一行，避免草稿里残留一份重复的旧内容
             val effId = if (draftId > 0) draftId else autosaveDraftId
@@ -399,6 +427,13 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     kotlinx.coroutines.delay(600); nav.popBackStack()
                 }
             }
+          } catch (e: Exception) {
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                sending = false
+                savedOnExit = false
+                toast = "发送失败：${e.message ?: "未知错误"}，请重试"
+            }
+          }
         }
     }
 
@@ -415,7 +450,9 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         Icon(if (recording) Icons.Default.Stop else Icons.Default.Mic, "录音")
                     }
                     IconButton(onClick = { showSchedule = true }) { Icon(Icons.Default.Schedule, "定时发送") }
-                    IconButton(onClick = { doSend(null) }) { Icon(Icons.Default.Send, "发送") }
+                    if (sending) {
+                        androidx.compose.material3.CircularProgressIndicator(Modifier.size(22.dp).padding(end = 8.dp), strokeWidth = 2.dp)
+                    } else IconButton(onClick = { doSend(null) }) { Icon(Icons.Default.Send, "发送") }
                 }
             )
         }
@@ -430,7 +467,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 confirmButton = { TextButton(onClick = { stopRecording(true) }) { Text("保存") } },
                 dismissButton = { TextButton(onClick = { stopRecording(false) }) { Text("取消录音") } })
         }
-        LazyColumn(Modifier.padding(pad).fillMaxSize().padding(horizontal = 14.dp)) {
+        // imePadding：弹出键盘时整个编辑区自动上移，键盘永远不挡住正在输入的正文光标处
+        LazyColumn(Modifier.padding(pad).fillMaxSize().imePadding().padding(horizontal = 14.dp)) {
             // 发件账号选择
             item {
                 if (accounts.isEmpty()) {
@@ -547,7 +585,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         IconButton(onClick = { editLink = b }, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Default.Edit, "编辑链接", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        IconButton(onClick = { blocks.remove(b) }, modifier = Modifier.size(28.dp)) {
+                        IconButton(onClick = { removeLinkBlock(b) }, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Default.Close, "删除链接", Modifier.size(16.dp), tint = Color(0xFFEF6C00))
                         }
                     }
@@ -627,7 +665,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     }) { Text("保存") }
                 },
                 dismissButton = { Row {
-                    TextButton(onClick = { blocks.remove(lk); editLink = null; toast = "链接已删除" }) { Text("删除链接", color = Color(0xFFEF6C00)) }
+                    TextButton(onClick = { removeLinkBlock(lk); editLink = null; toast = "链接已删除" }) { Text("删除链接", color = Color(0xFFEF6C00)) }
                     TextButton(onClick = { editLink = null }) { Text("关闭") }
                 } })
         }
@@ -740,39 +778,45 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         }
         if (showSchedule) {
             val cal = Calendar.getInstance()
+            var yr by remember { mutableStateOf(cal.get(Calendar.YEAR)) }
             var mo by remember { mutableStateOf(cal.get(Calendar.MONTH) + 1) }
             var dy by remember { mutableStateOf(cal.get(Calendar.DAY_OF_MONTH)) }
             var hh by remember { mutableStateOf(cal.get(Calendar.HOUR_OF_DAY)) }
             var mi by remember { mutableStateOf(cal.get(Calendar.MINUTE)) }
+            val maxYear = cal.get(Calendar.YEAR) + 5
             fun validDate(m: Int, d: Int): Boolean {
                 val max = when (m) { 1,3,5,7,8,10,12 -> 31; 4,6,9,11 -> 30; else -> 29 }
                 return d in 1..max
             }
             val target: Long = run {
                 val c = Calendar.getInstance()
-                val now = c.timeInMillis
-                c.set(c.get(Calendar.YEAR), mo - 1, dy, hh, mi, 0)
-                if (c.timeInMillis <= now) { c.add(Calendar.YEAR, 1) }
+                c.set(yr, mo - 1, dy, hh, mi, 0)
+                c.set(Calendar.MILLISECOND, 0)
                 c.timeInMillis
             }
             val invalid = !validDate(mo, dy)
+            val inPast = target <= System.currentTimeMillis()
             AlertDialog(
                 onDismissRequest = { showSchedule = false },
                 title = { Text("定时发送") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("目标时间：${fmtFull(target)}", fontSize = 14.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        // 年份可调：默认当前年(如 2026)，之前固定在当前年后导致选过去日期被自动+1 年显示成 2027
+                        Stepper("年份", yr, cal.get(Calendar.YEAR), maxYear) { yr = it }
                         Stepper("月份", mo, 1, 12) { mo = it }
                         Stepper("日期", dy, 1, 31) { dy = it }
                         if (invalid) Text("$mo 月没有 $dy 日，请修改", fontSize = 12.sp, color = Color(0xFFEF6C00))
                         Stepper("小时", hh, 0, 23) { hh = it }
                         Stepper("分钟", mi, 0, 59) { mi = it }
+                        if (!invalid && inPast) Text("所选时间早于当前时间，请重选(可选今天稍晚/明天/后天等)",
+                            fontSize = 12.sp, color = Color(0xFFEF6C00))
                         Text("到点自动真实发送；APP 不打开(被清理后台)也会生效", fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 },
                 confirmButton = {
-                    TextButton(enabled = !invalid, onClick = { showSchedule = false; doSend(target) }) { Text("确定定时发送") }
+                    TextButton(enabled = !invalid && !inPast, onClick = { showSchedule = false; doSend(target) }) { Text("确定定时发送") }
                 },
                 dismissButton = { TextButton(onClick = { showSchedule = false }) { Text("取消") } }
             )
