@@ -21,14 +21,16 @@ object MailService {
     const val MS_REDIRECT = "https://localhost"
     const val MS_SCOPES = "openid profile email offline_access https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send"
 
-    fun msAuthorizeUrl() = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize" +
+    fun msAuthorizeUrl(codeChallenge: String) = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize" +
             "?client_id=$MS_CLIENT_ID&response_type=code&redirect_uri=$MS_REDIRECT" +
-            "&response_mode=query&scope=${java.net.URLEncoder.encode(MS_SCOPES, "UTF-8")}&prompt=select_account"
+            "&response_mode=query&scope=${java.net.URLEncoder.encode(MS_SCOPES, "UTF-8")}" +
+            "&code_challenge=$codeChallenge&code_challenge_method=S256&prompt=select_account"
 
-    /** 用授权码换取令牌，返回 (accessToken, refreshToken, 过期毫秒) */
-    fun msExchangeToken(code: String): Triple<String, String, Long> {
+    /** 用授权码换取令牌(需携带 PKCE 校验器)，返回 (accessToken, refreshToken, 过期毫秒) */
+    fun msExchangeToken(code: String, verifier: String): Triple<String, String, Long> {
         val body = "client_id=$MS_CLIENT_ID&grant_type=authorization_code" +
-                "&code=${java.net.URLEncoder.encode(code, "UTF-8")}&redirect_uri=$MS_REDIRECT"
+                "&code=${java.net.URLEncoder.encode(code, "UTF-8")}&redirect_uri=$MS_REDIRECT" +
+                "&code_verifier=${java.net.URLEncoder.encode(verifier, "UTF-8")}"
         return msTokenRequest(body)
     }
 
@@ -49,8 +51,17 @@ object MailService {
             connectTimeout = 20000; readTimeout = 20000
         }
         conn.outputStream.use { it.write(form.toByteArray()) }
-        val resp = conn.inputStream.bufferedReader().readText()
-        val json = org.json.JSONObject(resp)
+        // 微软在授权失败时返回 HTTP 400，必须读 errorStream 才能拿到真实错误(否则只会显示 URL)
+        val respText = try {
+            conn.inputStream.bufferedReader().readText()
+        } catch (e: Exception) {
+            val errBody = runCatching { conn.errorStream?.bufferedReader()?.readText() }.getOrNull()
+            val desc = errBody?.let {
+                runCatching { org.json.JSONObject(it).optString("error_description") }.getOrNull()
+            }
+            throw Exception(desc?.takeIf { it.isNotBlank() } ?: "网络请求失败(${e.message ?: "未知错误"})，请检查网络后重试")
+        }
+        val json = org.json.JSONObject(respText)
         if (json.has("error")) throw Exception("OAuth 失败：${json.optString("error_description")}")
         return Triple(
             json.getString("access_token"),
