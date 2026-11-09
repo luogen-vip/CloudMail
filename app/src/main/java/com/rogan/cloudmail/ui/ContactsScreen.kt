@@ -91,7 +91,10 @@ fun ContactsScreen(nav: NavHostController) {
             }
         }
     ) { pad ->
-        LazyColumn(Modifier.padding(pad).fillMaxSize()) {
+        // 切换排序方式后强制回到列表绝对顶部
+        val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+        androidx.compose.runtime.LaunchedEffect(sortMode, importantFirst) { listState.scrollToItem(0) }
+        LazyColumn(state = listState, modifier = Modifier.padding(pad).fillMaxSize()) {
             items(sorted, key = { it.id }) { c ->
                 Row(Modifier.fillMaxWidth().clickable { nav.navigate("contactEdit/${c.id}") }
                     .padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
