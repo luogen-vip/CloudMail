@@ -67,11 +67,10 @@ fun SettingsScreen(nav: NavHostController) {
             ListItem(headlineContent = { Text("搜索邮件/联系人") },
                 leadingContent = { Icon(Icons.Default.Search, null) },
                 modifier = Modifier.clickable { nav.navigate("search") })
-            ListItem(headlineContent = { Text("清空已删除(回收站)") },
+            ListItem(headlineContent = { Text("回收站管理") },
+                supportingContent = { Text("在侧边栏「已删除(回收站)」中查看、还原或彻底删除；列表页内有「清空回收站」按钮") },
                 leadingContent = { Icon(Icons.Default.DeleteSweep, null) },
-                modifier = Modifier.clickable {
-                    kotlinx.coroutines.MainScope().launch { db.messages().emptyTrash() }
-                })
+                modifier = Modifier.clickable { nav.popBackStack() })
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text("功能说明", fontSize = 16.sp, fontWeight = FontWeight.Bold)
             val tips = listOf(
