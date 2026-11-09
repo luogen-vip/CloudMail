@@ -17,6 +17,19 @@ android {
     namespace = "com.rogan.cloudmail"
     compileSdk = 34
 
+    // 注意：signingConfigs 必须在 buildTypes 之前声明，否则 getByName 找不到
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeType = keystoreProperties["storeType"] as String
+            }
+        }
+    }
+
     defaultConfig {
         applicationId = "com.rogan.cloudmail"
         minSdk = 26
@@ -31,18 +44,6 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (keystorePropertiesFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
-            }
-        }
-    }
-
-    signingConfigs {
-        if (keystorePropertiesFile.exists()) {
-            create("release") {
-                storeFile = file(keystoreProperties["storeFile"] as String)
-                storePassword = keystoreProperties["storePassword"] as String
-                keyAlias = keystoreProperties["keyAlias"] as String
-                keyPassword = keystoreProperties["keyPassword"] as String
-                storeType = keystoreProperties["storeType"] as String
             }
         }
     }
