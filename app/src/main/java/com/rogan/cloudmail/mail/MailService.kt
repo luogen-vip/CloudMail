@@ -15,6 +15,63 @@ import javax.mail.internet.*
 
 object MailService {
 
+    /* ---------- OAuth2 (Outlook 等) ---------- */
+
+    const val MS_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"   // Thunderbird 公开客户端
+    const val MS_REDIRECT = "https://localhost"
+    const val MS_SCOPES = "openid profile email offline_access https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send"
+
+    fun msAuthorizeUrl() = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize" +
+            "?client_id=$MS_CLIENT_ID&response_type=code&redirect_uri=$MS_REDIRECT" +
+            "&response_mode=query&scope=${java.net.URLEncoder.encode(MS_SCOPES, "UTF-8")}&prompt=select_account"
+
+    /** 用授权码换取令牌，返回 (accessToken, refreshToken, 过期毫秒) */
+    fun msExchangeToken(code: String): Triple<String, String, Long> {
+        val body = "client_id=$MS_CLIENT_ID&grant_type=authorization_code" +
+                "&code=${java.net.URLEncoder.encode(code, "UTF-8")}&redirect_uri=$MS_REDIRECT"
+        return msTokenRequest(body)
+    }
+
+    /** 用刷新令牌续期 */
+    fun msRefreshToken(refresh: String): Triple<String, String, Long> {
+        val body = "client_id=$MS_CLIENT_ID&grant_type=refresh_token" +
+                "&refresh_token=${java.net.URLEncoder.encode(refresh, "UTF-8")}" +
+                "&scope=${java.net.URLEncoder.encode(MS_SCOPES, "UTF-8")}"
+        return msTokenRequest(body)
+    }
+
+    private fun msTokenRequest(form: String): Triple<String, String, Long> {
+        val url = java.net.URL("https://login.microsoftonline.com/common/oauth2/v2.0/token")
+        val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            connectTimeout = 20000; readTimeout = 20000
+        }
+        conn.outputStream.use { it.write(form.toByteArray()) }
+        val resp = conn.inputStream.bufferedReader().readText()
+        val json = org.json.JSONObject(resp)
+        if (json.has("error")) throw Exception("OAuth 失败：${json.optString("error_description")}")
+        return Triple(
+            json.getString("access_token"),
+            json.optString("refresh_token", ""),
+            System.currentTimeMillis() + (json.optLong("expires_in", 3600) - 120) * 1000
+        )
+    }
+
+    /** 内存令牌缓存：email -> (token, refresh, 过期毫秒) */
+    private val tokenCache = java.util.concurrent.ConcurrentHashMap<String, Triple<String, String, Long>>()
+
+    /** 返回可用令牌：过期前自动用刷新令牌续期 */
+    fun ensureToken(acc: Account): String {
+        if (acc.oauthRefresh.isBlank()) return acc.password
+        val cached = tokenCache[acc.email]
+        if (cached != null && cached.third > System.currentTimeMillis() + 60_000) return cached.first
+        val (at, rt, ex) = msRefreshToken(cached?.second ?: acc.oauthRefresh)
+        tokenCache[acc.email] = Triple(at, rt.ifBlank { acc.oauthRefresh }, ex)
+        return at
+    }
+
     /* ---------- 会话/连接 ---------- */
 
     private fun imapProps(acc: Account) = Properties().apply {
@@ -25,6 +82,8 @@ object MailService {
         put("mail.imaps.connectiontimeout", "20000")
         put("mail.imaps.timeout", "30000")
         put("mail.mime.decodetext.strict", "false")
+        if (acc.oauthToken.isNotBlank() || acc.oauthRefresh.isNotBlank())
+            put("mail.imaps.auth.mechanisms", "XOAUTH2")
     }
 
     private fun smtpProps(acc: Account) = Properties().apply {
@@ -37,12 +96,15 @@ object MailService {
         put("mail.smtp.connectiontimeout", "20000")
         put("mail.smtp.timeout", "30000")
         put("mail.smtp.ssl.trust", acc.smtpHost)
+        if (acc.oauthToken.isNotBlank() || acc.oauthRefresh.isNotBlank())
+            put("mail.smtp.auth.mechanisms", "XOAUTH2")
     }
 
     fun connectImap(acc: Account): Store {
+        val token = ensureToken(acc)
         val session = Session.getInstance(imapProps(acc))
         val store = session.getStore("imaps")
-        store.connect(acc.imapHost, acc.imapPort, acc.email, acc.password)
+        store.connect(acc.imapHost, acc.imapPort, acc.email, token)
         return store
     }
 
@@ -261,7 +323,7 @@ object MailService {
             container.addBodyPart(bp)
         }
         mime.setContent(container)
-        Transport.send(mime, acc.email, acc.password)
+        Transport.send(mime, acc.email, ensureToken(acc))
 
         // 保存到已发送 (IMAP APPEND)
         runCatching {
@@ -348,7 +410,7 @@ object MailService {
     }.getOrDefault(false)
 
     /** 真实发送 MDN 已读回执(按 RFC 2298) */
-    private fun sendMdn(ctx: Context, acc: Account, msg: MailMessage, rrt: String) {
+    fun sendMdn(ctx: Context, acc: Account, msg: MailMessage, rrt: String) {
         runCatching {
             val session = Session.getInstance(smtpProps(acc))
             val mdn = MimeMessage(session)
@@ -369,7 +431,7 @@ object MailService {
             human.setText("${acc.nickname.ifBlank { acc.email }} 已阅读您的邮件《${msg.subject.ifBlank { "(无主题)" }}》。", "utf-8")
             mp.addBodyPart(human)
             mdn.setContent(mp)
-            Transport.send(mdn, acc.email, acc.password)
+            Transport.send(mdn, acc.email, ensureToken(acc))
         }
     }
 
