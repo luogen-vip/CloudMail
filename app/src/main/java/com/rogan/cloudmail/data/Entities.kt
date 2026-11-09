@@ -42,7 +42,8 @@ data class MailMessage(
     var isAd: Boolean,              // 广告邮件标记
     var hasAttachments: Boolean,
     var attachmentsJson: String,    // [{name,path,mime,isInline,cid}]
-    var loaded: Boolean             // 正文是否已拉取
+    var loaded: Boolean,            // 正文是否已拉取
+    var size: Long = 0              // 邮件大小(字节)
 )
 
 @Entity(tableName = "contacts")
@@ -71,8 +72,9 @@ data class OutboxItem(
     val readReceipt: Boolean,
     val cardMode: Boolean,
     val scheduledAt: Long?,         // null=普通草稿; 有值=定时发送
-    val status: String,             // DRAFT / SCHEDULED / SENDING
-    val updatedAt: Long
+    val status: String,             // DRAFT / SCHEDULED / SENDING / FAILED
+    val updatedAt: Long,
+    val error: String = ""          // 发送失败原因
 )
 
 /* ============ DAO ============ */
@@ -118,6 +120,10 @@ interface MessageDao {
     @Query("DELETE FROM messages WHERE id = :id") suspend fun deleteForever(id: Long)
     @Query("DELETE FROM messages WHERE folder = 'TRASH'") suspend fun emptyTrash()
     @Query("DELETE FROM messages WHERE accountId = :acc") suspend fun deleteByAccount(acc: Long)
+    @Query("UPDATE messages SET isRead = 1 WHERE folder IN ('INBOX','SENT') AND isRead = 0") suspend fun markAllRead()
+    @Query("SELECT COUNT(*) FROM messages WHERE folder IN ('INBOX','SENT')") suspend fun countAll(): Int
+    @Query("SELECT COUNT(*) FROM messages WHERE folder = 'INBOX'") suspend fun countInbox(): Int
+    @Query("SELECT COUNT(*) FROM messages WHERE folder = 'SENT'") suspend fun countSent(): Int
     @Query("SELECT * FROM messages WHERE (subject LIKE '%'||:q||'%' OR bodyHtml LIKE '%'||:q||'%' OR fromAddr LIKE '%'||:q||'%' OR toAddr LIKE '%'||:q||'%') AND folder IN ('INBOX','SENT','TRASH') ORDER BY date DESC LIMIT 100")
     suspend fun search(q: String): List<MailMessage>
 }
