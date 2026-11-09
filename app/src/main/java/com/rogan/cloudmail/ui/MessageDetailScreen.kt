@@ -218,6 +218,8 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 update = { wv -> wv.loadDataWithBaseURL(null, html, "text/html", "utf-8", null) },
                 modifier = Modifier.fillMaxWidth().weight(1f)
             )
+            // 附件区
+            val atts = remember(m.attachmentsJson) { AttInfo.fromJson(m.attachmentsJson) }
             if (atts.isNotEmpty()) {
                 HorizontalDivider()
                 Column(Modifier.padding(12.dp)) {
