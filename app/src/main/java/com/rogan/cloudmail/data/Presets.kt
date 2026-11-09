@@ -82,11 +82,12 @@ data class AttInfo(
     val path: String,
     val mime: String,
     val isInline: Boolean,
-    val cid: String
+    val cid: String,
+    val dur: Int = 0
 ) {
     fun toJson(): String = JSONObject().apply {
         put("name", name); put("path", path); put("mime", mime)
-        put("inline", isInline); put("cid", cid)
+        put("inline", isInline); put("cid", cid); put("dur", dur)
     }.toString()
 
     companion object {
@@ -95,7 +96,7 @@ data class AttInfo(
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
                 AttInfo(o.optString("name"), o.optString("path"), o.optString("mime"),
-                    o.optBoolean("inline"), o.optString("cid"))
+                    o.optBoolean("inline"), o.optString("cid"), o.optInt("dur"))
             }
         }.getOrDefault(emptyList())
     }
