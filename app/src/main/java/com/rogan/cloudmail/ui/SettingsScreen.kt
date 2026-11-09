@@ -85,7 +85,7 @@ fun SettingsScreen(nav: NavHostController) {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text("关于云邮", fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Text("版本 1.3.3", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("版本 1.3.4", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("作者：罗根", fontSize = 15.sp, fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary)
                     Text("一款支持多账号、多服务商的真实邮箱客户端", fontSize = 12.sp,
