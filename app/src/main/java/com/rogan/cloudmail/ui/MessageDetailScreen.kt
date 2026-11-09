@@ -42,6 +42,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
     var showRemark by remember { mutableStateOf(false) }
     var contact by remember { mutableStateOf<Contact?>(null) }
     var m0 by remember { mutableStateOf<MailMessage?>(null) }
+    var recallResult by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(id) {
         val m = db.messages().byId(id)
@@ -170,6 +171,20 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 return false
                             }
                         }
+                        // 点击正文中的图片 → 全屏预览/保存
+                        setOnTouchListener { _, ev ->
+                            if (ev.action == android.view.MotionEvent.ACTION_UP) {
+                                val hr = hitTestResult
+                                if (hr.type == android.webkit.WebView.HitTestResult.IMAGE_TYPE ||
+                                    hr.type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
+                                    val src = hr.extra ?: return@setOnTouchListener false
+                                    val path = src.removePrefix("file://").substringBefore("?")
+                                    val f = File(path)
+                                    if (f.exists()) { showImg = f; return@setOnTouchListener true }
+                                }
+                            }
+                            false
+                        }
                     }
                 },
                 update = { wv -> wv.loadDataWithBaseURL(null, html, "text/html", "utf-8", null) },
@@ -273,9 +288,11 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         confirmRecall = false
                         scope.launch {
                             val r = withContext(Dispatchers.IO) {
-                                MailService.recall(acc!!, m.messageId, m.toAddr.substringBefore(",").trim(), m.subject)
+                                runCatching {
+                                    MailService.recall(acc!!, m.messageId, m.toAddr.substringBefore(",").trim(), m.subject)
+                                }.getOrElse { false to "撤回失败：${it.message ?: "网络或服务器错误"}" }
                             }
-                            toast = r.second
+                            recallResult = (if (r.first) "撤回成功！" else "撤回未完全成功。") + "\n" + r.second
                             if (r.first || r.second.contains("已从")) {
                                 db.messages().setFolder(m.id, "TRASH")
                             }
@@ -284,6 +301,13 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 },
                 dismissButton = { TextButton(onClick = { confirmRecall = false }) { Text("取消") } }
             )
+        }
+        // 撤回结果醒目弹窗
+        recallResult?.let { r ->
+            AlertDialog(onDismissRequest = { recallResult = null },
+                title = { Text(if (r.startsWith("撤回成功")) "✓ 撤回成功" else "撤回结果") },
+                text = { Text(r, fontSize = 14.sp) },
+                confirmButton = { TextButton(onClick = { recallResult = null }) { Text("知道了") } })
         }
         // 备注对话框：无需添加联系人也能备注/取消备注
         if (showRemark) {
