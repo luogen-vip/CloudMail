@@ -305,7 +305,8 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                                 fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
                         }
                     }
-                    if (folder == "outbox") OutboxList(nav, refresh) else MessageList(nav, folder, refresh, sortMode, reloadKey, sortNonce, scrollNonce)
+                    if (folder == "outbox") OutboxList(nav, refresh) else MessageList(nav, folder, refresh, sortMode, reloadKey, sortNonce, scrollNonce,
+                        syncingEmpty = syncing)
                 }
                 if (manualSync) LinearProgressIndicator(Modifier.fillMaxWidth())
                 syncMsg?.let { t ->
@@ -358,10 +359,13 @@ private fun folderTitle(f: String) = when {
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Unit,
-                sortMode: Int = 0, reloadKey: Int = 0, sortNonce: Int = 0, scrollNonce: Int = 0) {
+                sortMode: Int = 0, reloadKey: Int = 0, sortNonce: Int = 0, scrollNonce: Int = 0,
+                syncingEmpty: Boolean = false) {
     val ctx = LocalContext.current
     val db = AppDatabase.get(ctx)
     var msgs by remember(folder) { mutableStateOf<List<MailMessage>>(emptyList()) }
+    // 首次加载数据库完成前显示加载状态，避免闪烁“暂无邮件”误导用户
+    var firstLoad by remember(folder) { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     suspend fun loadList(): List<MailMessage> = kotlinx.coroutines.withContext(Dispatchers.IO) {
         val rows = when {
@@ -390,6 +394,7 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     LaunchedEffect(folder, reloadKey, sortMode, sortNonce, scrollNonce) {
         msgs = loadList()
+        firstLoad = false
         listState.scrollToItem(0)
     }
     val life = androidx.compose.ui.platform.LocalLifecycleOwner.current
@@ -430,7 +435,17 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     Box(Modifier.fillMaxSize()) {
         if (msgs.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(if (folder == "trash") "回收站为空" else "暂无邮件", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // 首次登录正在从服务器拉取邮件(或首次加载本地库)时：明确显示“正在同步”，
+                // 不再让用户误以为没有邮件；同步完成后列表自动出现
+                if (firstLoad || syncingEmpty) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        androidx.compose.material3.CircularProgressIndicator(Modifier.size(34.dp), strokeWidth = 3.dp)
+                        Spacer(Modifier.height(12.dp))
+                        Text("正在同步邮件，请稍候…", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    Text(if (folder == "trash") "回收站为空" else "暂无邮件", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
             return
         }
