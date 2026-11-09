@@ -82,7 +82,7 @@ interface AccountDao {
     @Query("SELECT * FROM accounts ORDER BY id") suspend fun all(): List<Account>
     @Query("SELECT * FROM accounts WHERE id = :id") suspend fun byId(id: Long): Account?
     @Query("SELECT * FROM accounts WHERE email = :email LIMIT 1") suspend fun byEmail(email: String): Account?
-    @Query("SELECT * FROM accounts WHERE isDefault = 1 LIMIT 1") suspend fun default(): Account?
+    @Query("SELECT * FROM accounts WHERE isDefault = 1 LIMIT 1") suspend fun getDefault(): Account?
     @Insert suspend fun insert(a: Account): Long
     @Update suspend fun update(a: Account)
     @Query("DELETE FROM accounts WHERE id = :id") suspend fun delete(id: Long)
