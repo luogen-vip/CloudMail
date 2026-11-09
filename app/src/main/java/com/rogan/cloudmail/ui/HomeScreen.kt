@@ -29,6 +29,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.rogan.cloudmail.data.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /* ================== 根导航 ================== */
@@ -106,10 +107,11 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     // 系统返回键：侧边栏打开时先关闭侧边栏，而不是退出APP
     BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
 
+    // 真实立即同步：必须在 IO 线程执行 IMAP 网络请求(主线程会被系统拦截导致“刷新没反应”)
     val doSync = {
         if (!syncing && accounts.isNotEmpty()) {
             syncing = true
-            scope.launch {
+            scope.launch(Dispatchers.IO) {
                 val accs = if (folder.startsWith("account:"))
                     listOfNotNull(db.accounts().byId(folder.substringAfter(":").toLong()))
                 else db.accounts().all()
@@ -120,14 +122,24 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 // 同步到的新邮件立即弹通知(与后台同步一致，不漏提醒)
                 newMails.filter { !it.isRead && it.folder == "INBOX" }
                     .forEach { com.rogan.cloudmail.mail.SyncWorker.notifyNew(ctx, it.accountId, it) }
-                syncing = false
-                refresh()
-                reloadKey++
-                // 只在有新邮件时提示，不再每次都弹「已是最新」
-                if (newMails.isNotEmpty()) syncMsg = "收到 ${newMails.size} 封新邮件"
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    syncing = false
+                    refresh()
+                    reloadKey++
+                    // 只在有新邮件时提示，不再每次都弹「已是最新」
+                    if (newMails.isNotEmpty()) syncMsg = "收到 ${newMails.size} 封新邮件"
+                }
             }
         }
         Unit
+    }
+
+    // APP 在前台时每 20 秒自动同步一次，保证别人发来的邮件立刻显示+弹通知(与 QQ 邮箱体验一致)
+    LaunchedEffect(accounts.isNotEmpty()) {
+        while (accounts.isNotEmpty()) {
+            kotlinx.coroutines.delay(20_000)
+            doSync()
+        }
     }
 
     // 回到前台/进入主页时自动同步(8秒节流)，保证新邮件马上可见
@@ -230,7 +242,20 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
             }
         ) { pad ->
             Box(Modifier.padding(pad).fillMaxSize()) {
-                if (folder == "outbox") OutboxList(nav, refresh) else MessageList(nav, folder, refresh, sortMode, reloadKey)
+                Column(Modifier.fillMaxSize()) {
+                    // 待发送状态条(仿 QQ 邮箱)：发送中/待发送的邮件在最顶部醒目提示，点击进入草稿/待发送列表
+                    if (outboxCount > 0 && folder != "outbox") {
+                        Row(Modifier.fillMaxWidth().clickable { folder = "outbox"; reloadKey++ }
+                            .background(MaterialTheme.colorScheme.primaryContainer)
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Schedule, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                            Text("  待发送邮件 ${outboxCount} 封(含正在发送/定时/草稿)，点击查看",
+                                fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                    if (folder == "outbox") OutboxList(nav, refresh) else MessageList(nav, folder, refresh, sortMode, reloadKey)
+                }
                 if (syncing) LinearProgressIndicator(Modifier.fillMaxWidth())
                 syncMsg?.let { t ->
                     Snackbar(Modifier.padding(16.dp)) { Text(t) }
@@ -323,9 +348,9 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     // 系统返回键：多选模式下先退出多选，而不是退出 APP
     androidx.activity.compose.BackHandler(enabled = selectionMode) { exitSelection() }
 
-    // 排序/刷新后回到列表顶部，保证正在看的邮件位置可预测
+    // 排序/切换文件夹/刷新后强制回到列表绝对顶部(第 0 项)，不残留任何上方邮件
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(sortMode) { listState.scrollToItem(0) }
+    LaunchedEffect(sortMode, reloadKey, folder) { listState.scrollToItem(0) }
 
     val deleteIds = { ids: Set<Long>, forever: Boolean ->
         scope.launch {
@@ -529,6 +554,10 @@ fun OutboxList(nav: NavHostController, refreshParent: () -> Unit) {
                             }
                             o.scheduledAt != null -> {
                                 Text("定时发送", fontSize = 10.sp, color = Color.White,
+                                    modifier = Modifier.background(MaterialTheme.colorScheme.primary, MaterialTheme.shapes.small).padding(horizontal = 6.dp, vertical = 2.dp))
+                            }
+                            o.status == "SENDING" -> {
+                                Text("正在发送", fontSize = 10.sp, color = Color.White,
                                     modifier = Modifier.background(MaterialTheme.colorScheme.primary, MaterialTheme.shapes.small).padding(horizontal = 6.dp, vertical = 2.dp))
                             }
                             else -> {
