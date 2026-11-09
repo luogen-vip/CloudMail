@@ -469,7 +469,15 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         }
     }
 
+    // 提示条用 Scaffold 标准的 SnackbarHost：之前直接把 Snackbar 放在内容层顶部，
+    // 被顶栏(标题栏)遮住根本看不见——“未填收件人点发送没提示”就是这个原因
+    val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
+    LaunchedEffect(toast) {
+        toast?.let { snackbar.showSnackbar(it); toast = null }
+    }
+
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = { Text("写邮件", fontSize = 18.sp) },
@@ -909,10 +917,6 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     }
                 }
             )
-        }
-        toast?.let { t ->
-            Snackbar(Modifier.padding(16.dp)) { Text(t) }
-            LaunchedEffect(t) { kotlinx.coroutines.delay(3000); toast = null }
         }
     }
 }
