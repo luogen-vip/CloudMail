@@ -391,7 +391,8 @@ fun EditAccountScreen(nav: NavHostController, id: Long) {
         val a0 = acc ?: return@Scaffold
         Column(Modifier.padding(pad).padding(16.dp).verticalScroll(rememberScrollState())) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Avatar(a0, 56.dp)
+                // 头像预览实时跟随已选图片：选完立即生效显示(保存后所有列表同步使用)
+                AvatarOf(nickname.text.ifBlank { a0.email }, avatarPath, 56.dp)
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(a0.email, fontSize = 15.sp, fontWeight = FontWeight.Bold)
@@ -400,9 +401,26 @@ fun EditAccountScreen(nav: NavHostController, id: Long) {
                 }
             }
             Spacer(Modifier.height(10.dp))
-            OutlinedButton(onClick = { imgPick.launch("image/*") }) { Text("更换头像") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { imgPick.launch("image/*") }) { Text("更换头像") }
+                if (avatarPath != null) {
+                    OutlinedButton(onClick = { avatarPath = null }) { Text("恢复默认头像") }
+                }
+            }
             Spacer(Modifier.height(8.dp))
-            TextField(value = nickname, onValueChange = { nickname = it }, label = { Text("显示昵称") }, modifier = Modifier.fillMaxWidth())
+            // 显示名称：只是显示用的名字(列表/侧边栏/发件人名)，不影响邮箱地址本身
+            TextField(value = nickname, onValueChange = { nickname = it },
+                label = { Text("显示名称(邮箱地址不变，仅显示用)") }, modifier = Modifier.fillMaxWidth())
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("想在列表里显示的名字；留空则显示邮箱地址", fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.weight(1f))
+                if (nickname.text.isNotBlank()) {
+                    TextButton(onClick = { nickname = TextFieldValue("") }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Text("恢复默认", fontSize = 12.sp)
+                    }
+                }
+            }
             if (a0.oauthRefresh.isBlank()) {
                 TextField(value = password, onValueChange = { password = it }, label = { Text("密码/授权码(可更新)") },
                     visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
