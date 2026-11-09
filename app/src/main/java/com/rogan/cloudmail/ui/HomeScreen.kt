@@ -82,6 +82,8 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     var sortMode by remember { mutableStateOf(0) }
     var showSortMenu by remember { mutableStateOf(false) }
     var reloadKey by remember { mutableStateOf(0) }
+    var syncMsg by remember { mutableStateOf<String?>(null) }
+    var lastAutoSync by remember { mutableStateOf(0L) }
 
     val refresh = {
         scope.launch {
@@ -105,17 +107,40 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
 
     val doSync = {
-        syncing = true
-        scope.launch {
-            val accs = if (folder.startsWith("account:"))
-                listOfNotNull(db.accounts().byId(folder.substringAfter(":").toLong()))
-            else db.accounts().all()
-            for (a in accs) runCatching { com.rogan.cloudmail.mail.MailService.syncAccount(ctx, a, db) }
-            syncing = false
-            refresh()
-            reloadKey++
+        if (!syncing && accounts.isNotEmpty()) {
+            syncing = true
+            scope.launch {
+                val accs = if (folder.startsWith("account:"))
+                    listOfNotNull(db.accounts().byId(folder.substringAfter(":").toLong()))
+                else db.accounts().all()
+                var total = 0
+                for (a in accs) runCatching {
+                    total += com.rogan.cloudmail.mail.MailService.syncAccount(ctx, a, db).size
+                }
+                syncing = false
+                refresh()
+                reloadKey++
+                syncMsg = if (accs.isEmpty()) "还没有邮箱账号，请先添加"
+                    else if (total > 0) "同步完成：收到 $total 封新邮件" else "已是最新，没有新邮件"
+            }
         }
         Unit
+    }
+
+    // 回到前台/进入主页时自动同步(30秒节流)，保证新邮件马上可见
+    val life = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(life) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                if (System.currentTimeMillis() - lastAutoSync > 30_000) {
+                    lastAutoSync = System.currentTimeMillis()
+                    doSync()
+                }
+                refresh()
+            }
+        }
+        life.lifecycle.addObserver(obs)
+        onDispose { life.lifecycle.removeObserver(obs) }
     }
 
     ModalNavigationDrawer(
@@ -166,17 +191,6 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                     FolderItem(Icons.Default.Send, "已发送", folder == "sent") { folder = "sent"; reloadKey++; scope.launch { drawer.close() } }
                     FolderItem(Icons.Default.Schedule, "草稿/待发送", folder == "outbox") { folder = "outbox"; reloadKey++; scope.launch { drawer.close() } }
                     FolderItem(Icons.Default.Delete, "已删除(回收站)", folder == "trash") { folder = "trash"; reloadKey++; scope.launch { drawer.close() } }
-                    HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                    // 一键全部已读
-                    ListItem(headlineContent = { Text("全部标为已读") },
-                        leadingContent = { Icon(Icons.Default.DoneAll, null) },
-                        modifier = Modifier.clickable {
-                            scope.launch {
-                                db.messages().markAllRead()
-                                refresh(); reloadKey++
-                            }
-                            scope.launch { drawer.close() }
-                        })
                     Spacer(Modifier.height(16.dp))
                     Text("作者：罗根", modifier = Modifier.padding(horizontal = 16.dp), fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -215,6 +229,10 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
             Box(Modifier.padding(pad).fillMaxSize()) {
                 if (folder == "outbox") OutboxList(nav, refresh) else MessageList(nav, folder, refresh, sortMode, reloadKey)
                 if (syncing) LinearProgressIndicator(Modifier.fillMaxWidth())
+                syncMsg?.let { t ->
+                    Snackbar(Modifier.padding(16.dp)) { Text(t) }
+                    LaunchedEffect(t) { kotlinx.coroutines.delay(2500); syncMsg = null }
+                }
             }
         }
         // 首次使用引导：还没有任何账号时,引导先添加邮箱
@@ -323,6 +341,11 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                 verticalAlignment = Alignment.CenterVertically) {
                 Text("共 ${msgs.size} 封", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.weight(1f))
+                if (folder == "unread") TextButton(onClick = {
+                    scope.launch { db.messages().markAllRead(); refreshParent(); reload() }
+                }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                    Text("全部标为已读", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                }
                 if (folder == "trash") TextButton(onClick = { showClearTrash = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
                     Text("清空回收站", fontSize = 12.sp, color = Color(0xFFEF6C00))
                 }
