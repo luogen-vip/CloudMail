@@ -46,6 +46,12 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
     var recallResult by remember { mutableStateOf<String?>(null) }
     var loadKey by remember { mutableStateOf(0) } // 失败重试：+1 后重新拉取正文
 
+    // 提示条用 Scaffold 标准 SnackbarHost：之前直接放内容层顶部被顶栏遮住看不见
+    val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
+    LaunchedEffect(toast) {
+        toast?.let { snackbar.showSnackbar(it); toast = null }
+    }
+
     LaunchedEffect(id, loadKey) {
         val m = db.messages().byId(id)
         m0 = m
@@ -64,6 +70,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
 
     val m = msg
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = { Text("邮件详情", fontSize = 18.sp) },
@@ -98,7 +105,14 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
             )
         }
     ) { pad ->
-        if (m == null) { Box(Modifier.padding(pad).fillMaxSize()); return@Scaffold }
+        if (m == null) {
+            // 加载占位：之前这里完全空白，从列表点进来那一瞬间像“点了没反应”；
+            // 现在立即显示转圈，点击反馈明确
+            Box(Modifier.padding(pad).fillMaxSize(), contentAlignment = Alignment.Center) {
+                androidx.compose.material3.CircularProgressIndicator(Modifier.size(34.dp), strokeWidth = 3.dp)
+            }
+            return@Scaffold
+        }
         Column(Modifier.padding(pad).fillMaxSize()) {
             // 头部信息(紧凑)
             Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
@@ -161,13 +175,8 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 }
                 if (m.isAd) Text("此邮件疑似广告邮件", fontSize = 11.sp, color = Color(0xFFEF6C00),
                     modifier = Modifier.padding(top = 2.dp))
-                // 退信提示
-                val isBounce = m.fromAddr.contains("mailer-daemon", true) ||
-                        m.fromAddr.contains("postmaster", true) ||
-                        m.subject.contains("Undeliverable", true) ||
-                        m.subject.contains("退回", false) ||
-                        m.subject.contains("Mail Delivery", true)
-                if (isBounce) {
+                // 退信提示(判断逻辑与列表/通知共用同一个函数，保证三处一致)
+                if (isBounceMail(m.fromAddr, m.subject)) {
                     Text("⚠ 这是退信通知：你之前发送的邮件未能成功送达对方服务器(可能对方邮箱不存在/已满/拒收)。详情见正文。",
                         fontSize = 12.sp, color = Color(0xFFD32F2F), fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(top = 4.dp))
@@ -405,10 +414,6 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                     }) { Text(if (remarkText.isBlank()) "取消备注" else "保存备注") }
                 },
                 dismissButton = { TextButton(onClick = { showRemark = false }) { Text("关闭") } })
-        }
-        toast?.let { t ->
-            Snackbar(Modifier.padding(16.dp)) { Text(t) }
-            LaunchedEffect(t) { kotlinx.coroutines.delay(3000); toast = null }
         }
     }
 }
