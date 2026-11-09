@@ -85,7 +85,7 @@ fun SettingsScreen(nav: NavHostController) {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text("关于云邮", fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Text("版本 1.2.1", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("版本 1.3.0", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("作者：罗根", fontSize = 15.sp, fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary)
                     Text("一款支持多账号、多服务商的真实邮箱客户端", fontSize = 12.sp,
@@ -129,10 +129,17 @@ fun SearchScreen(nav: NavHostController) {
         }
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
-            // 搜索框独立放在标题栏下方，高度固定，不再被遮挡
+            // 搜索框：圆润胶囊造型，高度固定不遮挡文字
             TextField(value = q, onValueChange = { q = it },
                 placeholder = { Text("输入即实时搜索：邮件主题/内容/联系人…", fontSize = 14.sp) },
-                singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                singleLine = true,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(26.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp).height(56.dp),
                 trailingIcon = {
                     if (q.isNotBlank()) IconButton(onClick = { q = "" }) { Icon(Icons.Default.Close, "清空") }
                 })
