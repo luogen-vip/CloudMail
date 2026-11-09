@@ -390,7 +390,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     }
 
     fun doSend(scheduledAt: Long?) {
-        if (sending) return
+        // 发送中重复点击：给出可见提示而不是静默忽略(之前静默 return 会被误解为“点了没反应”)
+        if (sending) { toast = "正在发送中，请稍候…"; return }
         val rcpt = toRows.map { it.trim() }.filter { it.isNotBlank() }
         if (rcpt.isEmpty()) { toast = "请填写收件人邮箱"; return }
         val bad = rcpt.filter { !emailRegex.matches(it) }
@@ -588,7 +589,10 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         // 所见即所得：正文里的 [文字](链接) 显示成蓝色下划线的「文字」(括号/地址不显示)，
                         // 发送时仍真实转成 <a> 超链接。光标/选区偏移在 MdLinkOffsetMap 中精确映射，编辑不受影响
                         visualTransformation = mdLinkVisual(),
-                        modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 180.dp)
+                        modifier = Modifier.fillMaxWidth().defaultMinSize(
+                            // 只有唯一正文块(空邮件初始)才撑满高度；链接/图片插入后拆出的相邻文本块保持紧凑，
+                            // 视觉上仍是一个连续正文区，不再出现“两个大正文块”的观感
+                            minHeight = if (blocks.size == 1) 180.dp else 40.dp)
                             .onFocusChanged { if (it.isFocused) focusBlockId = b.id },
                         colors = TextFieldDefaults.colors(
                             focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
@@ -792,25 +796,14 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             !u.startsWith("http") -> linkErr = "链接地址无效：必须以 http:// 或 https:// 开头"
                             !okUrl -> linkErr = "链接地址无效：请输入可访问的网址(如 https://www.example.com)"
                             else -> {
-                                // 以 Markdown 形式直接插入到光标处所在文本块内(发送时真实转成 <a> 链接)：
-                                // 不再拆出一个单独的链接块和新的正文块，正文保持一个连续输入区，不会多出一条横线
-                                val md = "[${lt.text.trim()}]($u)"
-                                val idx = blocks.indexOfFirst { it.id == focusBlockId && it is BodyBlock.T }
-                                if (idx >= 0) {
-                                    val t = blocks[idx] as BodyBlock.T
-                                    val pos = t.tv.selection.end.coerceIn(0, t.tv.text.length)
-                                    val nt = t.tv.text.substring(0, pos) + md + t.tv.text.substring(pos)
-                                    blocks[idx] = BodyBlock.T(t.id, TextFieldValue(nt, androidx.compose.ui.text.TextRange(pos + md.length)))
-                                } else {
-                                    val li = blocks.indexOfLast { it is BodyBlock.T }
-                                    if (li >= 0) {
-                                        val t = blocks[li] as BodyBlock.T
-                                        blocks[li] = BodyBlock.T(t.id, TextFieldValue(t.tv.text + md))
-                                    } else blocks.add(BodyBlock.T(nextBlockId(), TextFieldValue(md)))
-                                }
+                                // 改回独立的链接块(发送时真实生成 <a>，收件人可点击)：
+                                // 之前把 [文字](链接) 塞进文本块，输入法在映射边界插入文字会悄悄破坏标记，
+                                // 导致发送后链接丢失；链接块所见即所得且发送路径稳定可靠
+                                val blk = BodyBlock.Lk(nextBlockId(), lt.text.trim(), u)
+                                insertIntoBody(blk)
                                 userEdited = true
                                 showLink = false
-                                toast = "链接已插入到光标处(显示为蓝色高亮)"
+                                toast = "链接已插入到光标处(蓝色高亮)"
                             }
                         }
                     }) { Text("插入到光标位置") }
@@ -952,12 +945,15 @@ fun mdLinkVisual(): VisualTransformation = VisualTransformation { tfv ->
         val labelStart = ti
         val label = m.groupValues[1]
         for (ch in label) { o2t[oi] = ti; t2o[ti] = oi; b.append(ch); oi++; ti++ }
+        // 边界也必须显式写入：否则两个链接紧挨着时边界映射停留在默认值 0，光标会跳到开头
+        t2o[ti] = oi
         b.addStyle(SpanStyle(color = Color(0xFF1565C0), textDecoration = TextDecoration.Underline), labelStart, ti)
         // ']','(',url,')' 全部隐藏：原位置都映射到链接文字结尾
         o2t[oi] = ti; oi++ // ']'
         o2t[oi] = ti; oi++ // '('
         repeat(m.groupValues[2].length) { o2t[oi] = ti; oi++ }
         o2t[oi] = ti; oi++ // ')'
+        t2o[ti] = oi
     }
     while (oi < src.length) {
         o2t[oi] = ti; t2o[ti] = oi
