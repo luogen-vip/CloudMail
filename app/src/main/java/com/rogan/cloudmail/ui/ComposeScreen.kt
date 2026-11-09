@@ -223,7 +223,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     var savedOnExit by remember { mutableStateOf(false) }
     DisposableEffect(Unit) {
         onDispose {
-            if (!savedOnExit && loadedDraft && hasContent && sendAccId > 0) saveDraftNow()
+            // 只有用户手动输入过内容才自动存草稿；从联系人/转发自动带入的内容不算，返回时不误存也不误弹
+            if (!savedOnExit && loadedDraft && userEdited && hasContent && sendAccId > 0) saveDraftNow()
             runCatching { player?.release() }
         }
     }
@@ -344,8 +345,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             } else {
                 SendWorker.sendNow(ctx, itemId)
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    toast = "正在发送，成功或失败将以提示音通知"
-                    kotlinx.coroutines.delay(800); nav.popBackStack()
+                    // 发送状态由系统通知栏真实展示(正在发送/发送成功/失败)，不再在 APP 内弹文字提示
+                    kotlinx.coroutines.delay(600); nav.popBackStack()
                 }
             }
         }
