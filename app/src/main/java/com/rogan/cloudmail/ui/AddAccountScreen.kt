@@ -201,12 +201,13 @@ fun AddAccountScreen(nav: NavHostController) {
                     testing = false
                     msg = "授权未完成${err?.let { "：$it" } ?: ""}"
                 } else {
-                    val existed = withContext(Dispatchers.IO) { db.accounts().byEmail(email_!!) }
-                    if (existed != null) {
+                    val em = email_ ?: ""
+                    val existed = withContext(Dispatchers.IO) { db.accounts().byEmail(em) }
+                    if (existed != null || em.isBlank()) {
                         testing = false
-                        msg = "该邮箱（$email_）已添加过了，不能重复添加。"
+                        msg = if (em.isBlank()) "授权成功但未读取到邮箱地址，请重试" else "该邮箱（$em）已添加过了，不能重复添加。"
                     } else {
-                        val acc = buildAccount(email_, "", nickname.text,
+                        val acc = buildAccount(em, "", nickname.text,
                             "outlook.office365.com", "993", "smtp-mail.outlook.com", "587", false,
                             avatarPath, "Outlook/Hotmail", isDefault = false)
                             .copy(oauthToken = token ?: "", oauthRefresh = refresh ?: "", oauthExpire = expire ?: 0L)
