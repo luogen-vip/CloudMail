@@ -122,6 +122,7 @@ interface MessageDao {
     @Query("UPDATE messages SET folder = :folder WHERE id = :id") suspend fun setFolder(id: Long, folder: String)
     @Query("DELETE FROM messages WHERE id = :id") suspend fun deleteForever(id: Long)
     @Query("DELETE FROM messages WHERE folder = 'TRASH'") suspend fun emptyTrash()
+    @Query("UPDATE messages SET folder = 'INBOX' WHERE folder = 'TRASH'") suspend fun restoreAllTrash()
     @Query("DELETE FROM messages WHERE accountId = :acc") suspend fun deleteByAccount(acc: Long)
     @Query("UPDATE messages SET isRead = 1 WHERE folder IN ('INBOX','SENT') AND isRead = 0") suspend fun markAllRead()
     @Query("SELECT COUNT(*) FROM messages WHERE folder IN ('INBOX','SENT')") suspend fun countAll(): Int
