@@ -39,7 +39,26 @@ fun ContactsScreen(nav: NavHostController) {
         val list = contacts.toMutableList()
         when (sortMode) {
             0 -> list.sortWith(compareByDescending<Contact> { it.lastReceivedAt }.thenByDescending { it.createdAt })
-            1 -> list.sortBy { (it.remark.ifBlank { it.email }).uppercase() }
+            1 -> {
+                // 按字母排序：字母开头在前(按字母顺序)；非字母(数字等)排在后面，数字按数值大小排
+                fun sortKey(c: Contact): Pair<Int, String> {
+                    val name = (c.remark.ifBlank { c.email }).trim()
+                    val first = name.firstOrNull() ?: 'z'
+                    return if (first.isLetter()) 0 to name.uppercase()
+                    else 1 to name  // 数字/符号备注统一排在字母之后
+                }
+                list.sortWith(compareBy({ sortKey(it).first }, { sortKey(it).second }))
+                // 纯数字备注按数值排序(避免 100 排在 20 前面)
+                val digitGroup = list.filter { (it.remark.ifBlank { it.email }).trim().isNotEmpty() &&
+                        (it.remark.ifBlank { it.email }).trim().first().isDigit() }
+                        .sortedBy { (it.remark.ifBlank { it.email }).trim().takeWhile { ch -> ch.isDigit() }.toLongOrNull() ?: Long.MAX_VALUE }
+                if (digitGroup.size > 1) {
+                    val others = list.filterNot { (it.remark.ifBlank { it.email }).trim().firstOrNull()?.isDigit() == true }
+                    val digitNames = digitGroup.map { it.id }.toSet()
+                    val digitsInOrder = digitGroup.filter { it.id in digitNames }
+                    list.clear(); list.addAll(others + digitsInOrder)
+                }
+            }
             2 -> list.sortByDescending { it.createdAt }
         }
         if (importantFirst) {
