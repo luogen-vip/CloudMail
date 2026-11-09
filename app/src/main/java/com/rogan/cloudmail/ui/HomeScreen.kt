@@ -81,10 +81,12 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     var syncing by remember { mutableStateOf(false) }
     var outboxCount by remember { mutableStateOf(0) }
     var sortMode by remember { mutableStateOf(0) }
+    var sortNonce by remember { mutableStateOf(0) } // 每次点排序菜单都 +1：即使重复点同一排序也强制重排+回顶
     var showSortMenu by remember { mutableStateOf(false) }
     var reloadKey by remember { mutableStateOf(0) }
     var syncMsg by remember { mutableStateOf<String?>(null) }
     var lastAutoSync by remember { mutableStateOf(0L) }
+    var manualSync by remember { mutableStateOf(false) } // 只有手动点刷新才显示顶部进度条
 
     val refresh = {
         scope.launch {
@@ -108,9 +110,11 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
 
     // 真实立即同步：必须在 IO 线程执行 IMAP 网络请求(主线程会被系统拦截导致“刷新没反应”)
-    val doSync = {
+    // showBar=只有手动点刷新按钮才显示顶部进度条；后台自动同步静默进行，不打扰浏览
+    val doSync = { showBar: Boolean ->
         if (!syncing && accounts.isNotEmpty()) {
             syncing = true
+            if (showBar) manualSync = true
             scope.launch(Dispatchers.IO) {
                 val accs = if (folder.startsWith("account:"))
                     listOfNotNull(db.accounts().byId(folder.substringAfter(":").toLong()))
@@ -124,21 +128,39 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                     .forEach { com.rogan.cloudmail.mail.SyncWorker.notifyNew(ctx, it.accountId, it) }
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
                     syncing = false
+                    manualSync = false
                     refresh()
                     reloadKey++
                     // 只在有新邮件时提示，不再每次都弹「已是最新」
                     if (newMails.isNotEmpty()) syncMsg = "收到 ${newMails.size} 封新邮件"
                 }
             }
+        } else if (showBar) {
+            // 已有同步在进行：等它结束后立刻再补一次真实拉取，保证手动刷新一定拿到最新
+            scope.launch(Dispatchers.IO) {
+                while (syncing) kotlinx.coroutines.delay(200)
+                val nm = mutableListOf<com.rogan.cloudmail.data.MailMessage>()
+                runCatching {
+                    val accs = db.accounts().all()
+                    for (a in accs) runCatching { nm += com.rogan.cloudmail.mail.MailService.syncAccount(ctx, a, db) }
+                    nm.filter { !it.isRead && it.folder == "INBOX" }
+                        .forEach { com.rogan.cloudmail.mail.SyncWorker.notifyNew(ctx, it.accountId, it) }
+                }
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    manualSync = false
+                    refresh(); reloadKey++
+                    if (nm.isNotEmpty()) syncMsg = "收到 ${nm.size} 封新邮件"
+                }
+            }
         }
         Unit
     }
 
-    // APP 在前台时每 20 秒自动同步一次，保证别人发来的邮件立刻显示+弹通知(与 QQ 邮箱体验一致)
+    // APP 在前台时每 1 秒自动同步一次(静默)：别人发来的邮件几乎实时显示+弹通知，对齐 QQ 邮箱
     LaunchedEffect(accounts.isNotEmpty()) {
         while (accounts.isNotEmpty()) {
-            kotlinx.coroutines.delay(20_000)
-            doSync()
+            kotlinx.coroutines.delay(1_000)
+            doSync(false)
         }
     }
 
@@ -149,7 +171,7 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
             if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 if (System.currentTimeMillis() - lastAutoSync > 8_000) {
                     lastAutoSync = System.currentTimeMillis()
-                    doSync()
+                    doSync(false)
                 }
                 refresh()
             }
@@ -219,7 +241,7 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 TopAppBar(
                     title = { Text(folderTitle(folder)) },
                     actions = {
-                        IconButton(onClick = { doSync() }) {
+                        IconButton(onClick = { doSync(true) }) {
                             Icon(Icons.Default.Refresh, "同步/刷新收件(检查新邮件)")
                         }
                         IconButton(onClick = { showSortMenu = true }) { Icon(Icons.Default.Sort, "排序") }
@@ -227,7 +249,7 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                             listOf("按日期：最新优先", "按日期：最早优先", "按大小：从大到小", "按大小：从小到大")
                                 .forEachIndexed { i, s ->
                                     DropdownMenuItem(text = { Text(s, fontSize = 13.sp, fontWeight = if (sortMode == i) FontWeight.Bold else FontWeight.Normal) },
-                                        onClick = { sortMode = i; showSortMenu = false })
+                                        onClick = { sortMode = i; sortNonce++; showSortMenu = false })
                                 }
                         }
                         IconButton(onClick = { nav.navigate("search") }) { Icon(Icons.Default.Search, "搜索") }
@@ -254,9 +276,9 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                                 fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
                         }
                     }
-                    if (folder == "outbox") OutboxList(nav, refresh) else MessageList(nav, folder, refresh, sortMode, reloadKey)
+                    if (folder == "outbox") OutboxList(nav, refresh) else MessageList(nav, folder, refresh, sortMode, reloadKey, sortNonce)
                 }
-                if (syncing) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (manualSync) LinearProgressIndicator(Modifier.fillMaxWidth())
                 syncMsg?.let { t ->
                     Snackbar(Modifier.padding(16.dp)) { Text(t) }
                     LaunchedEffect(t) { kotlinx.coroutines.delay(2500); syncMsg = null }
@@ -307,7 +329,7 @@ private fun folderTitle(f: String) = when {
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Unit,
-                sortMode: Int = 0, reloadKey: Int = 0) {
+                sortMode: Int = 0, reloadKey: Int = 0, sortNonce: Int = 0) {
     val ctx = LocalContext.current
     val db = AppDatabase.get(ctx)
     var msgs by remember(folder) { mutableStateOf<List<MailMessage>>(emptyList()) }
@@ -329,7 +351,7 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             else -> msgs.sortedByDescending { it.date }
         }
     }; Unit }
-    LaunchedEffect(folder, reloadKey, sortMode) { reload() }
+    LaunchedEffect(folder, reloadKey, sortMode, sortNonce) { reload() }
     val life = androidx.compose.ui.platform.LocalLifecycleOwner.current
     DisposableEffect(life, folder) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
@@ -344,13 +366,19 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     var selected by remember { mutableStateOf(setOf<Long>()) }
     var showClearTrash by remember { mutableStateOf(false) }
     fun exitSelection() { selectionMode = false; selected = emptySet() }
+    // 取消勾选：若全部取消(一个都没选)，自动退出多选回到正常浏览状态
+    fun toggleSelect(id: Long, add: Boolean) {
+        val s = if (add) selected + id else selected - id
+        selected = s
+        if (!add && s.isEmpty()) selectionMode = false
+    }
 
     // 系统返回键：多选模式下先退出多选，而不是退出 APP
     androidx.activity.compose.BackHandler(enabled = selectionMode) { exitSelection() }
 
-    // 排序/切换文件夹/刷新后强制回到列表绝对顶部(第 0 项)，不残留任何上方邮件
+    // 排序/切换文件夹/刷新后强制回到列表绝对顶部(第 0 项)；sortNonce 保证重复点同一排序也回顶
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(sortMode, reloadKey, folder) { listState.scrollToItem(0) }
+    LaunchedEffect(sortMode, reloadKey, folder, sortNonce) { listState.scrollToItem(0) }
 
     val deleteIds = { ids: Set<Long>, forever: Boolean ->
         scope.launch {
@@ -432,16 +460,14 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                     val isSel = m.id in selected
                     Row(Modifier.fillMaxWidth().background(if (isSel) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)) {
                         if (selectionMode) {
-                            Checkbox(checked = isSel, onCheckedChange = {
-                                selected = if (it) selected + m.id else selected - m.id
-                            })
+                            Checkbox(checked = isSel, onCheckedChange = { toggleSelect(m.id, it) })
                         }
                         Column(Modifier.weight(1f)) {
                             Row(Modifier.fillMaxWidth()
                                 .combinedClickable(
                                     onClick = {
                                         if (selectionMode) {
-                                            selected = if (isSel) selected - m.id else selected + m.id
+                                            toggleSelect(m.id, !isSel)
                                         } else nav.navigate("detail/${m.id}")
                                     },
                                     onLongClick = { selectionMode = true; selected = selected + m.id })
