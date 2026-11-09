@@ -1,5 +1,6 @@
 package com.rogan.cloudmail.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -45,6 +46,7 @@ fun AddAccountScreen(nav: NavHostController) {
     var testing by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
     var avatarPath by remember { mutableStateOf<String?>(null) }
+    var showOAuth by remember { mutableStateOf(false) }
 
     val imgPick = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { u ->
@@ -70,7 +72,6 @@ fun AddAccountScreen(nav: NavHostController) {
         Text("支持 QQ / 163 / 139 / Outlook / Gmail 及任意自定义邮箱；QQ、163 等需填授权码",
             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-        // 预设选择：紧凑换行布局，点选后紧跟输入框
         @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
         androidx.compose.foundation.layout.FlowRow(
             Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -89,6 +90,23 @@ fun AddAccountScreen(nav: NavHostController) {
             }
         }
         preset?.let { Text("提示：${it.hint}", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 4.dp)) }
+
+        // Outlook 专属：网页授权登录(微软已关闭普通密码收发信，OAuth 是唯一可靠方式)
+        if (preset?.name == "Outlook/Hotmail" || email.text.substringAfter('@', "").lowercase()
+                .let { it == "outlook.com" || it == "hotmail.com" || it == "live.com" }) {
+            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("微软邮箱(Outook/Hotmail/Live)请使用网页授权登录", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text("微软已关闭「邮箱密码直接登录」；点下方按钮会在本 APP 内打开微软官方登录页，授权成功后自动添加账号，无需授权码。",
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 4.dp))
+                    Button(
+                        enabled = !testing && !showOAuth,
+                        onClick = { testing = true; showOAuth = true }
+                    ) { Icon(Icons.Default.OpenInBrowser, null, Modifier.size(16.dp)); Text(" 微软账号授权登录") }
+                }
+            }
+        }
+
         TextField(value = email, onValueChange = {
             email = it
         }, label = { Text("邮箱地址") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
@@ -130,6 +148,7 @@ fun AddAccountScreen(nav: NavHostController) {
 
         Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(enabled = !testing, onClick = {
+                if (testing) return@OutlinedButton
                 if (!emailRegex.matches(email.text.trim())) {
                     msg = "邮箱地址格式不正确：请输入完整地址，如 someone@qq.com（不能只填数字或文字）"
                     return@OutlinedButton
@@ -140,22 +159,31 @@ fun AddAccountScreen(nav: NavHostController) {
                 }
                 testing = true; msg = "正在验证登录…"
                 scope.launch {
+                    // 防重复：同一邮箱已添加过则直接提示，不再插入
+                    val existed = withContext(Dispatchers.IO) { db.accounts().byEmail(email.text.trim()) }
+                    if (existed != null) {
+                        testing = false
+                        msg = "该邮箱（${existed.email}）已添加过了，不能重复添加；如需修改密码请在「设置→我的邮箱」中编辑。"
+                        return@launch
+                    }
                     val acc = buildAccount(email.text.trim(), password.text, nickname.text,
                         imapHost, imapPort, smtpHost, smtpPort, smtpSsl, avatarPath,
-                        preset?.name ?: "自定义", isDefault = db.accounts().all().isEmpty())
+                        preset?.name ?: presetForEmail(email.text).name, isDefault = false)
                     val err = withContext(Dispatchers.IO) {
                         runCatching { MailService.verify(acc) }.exceptionOrNull()?.message ?: ""
                     }
-                    testing = false
                     if (err.isBlank()) {
-                        msg = "验证成功，正在保存并首次同步…"
-                        val id = db.accounts().insert(acc)
+                        val final = if (withContext(Dispatchers.IO) { db.accounts().all().isEmpty() }) acc.copy(isDefault = true) else acc
                         withContext(Dispatchers.IO) {
-                            runCatching { MailService.syncAccount(ctx, db.accounts().byId(id)!!, db) }
+                            db.accounts().insert(final)
+                            // 后台立即同步：登录不等待，马上可用
+                            com.rogan.cloudmail.mail.SyncWorker.syncAllNow(ctx)
                         }
                         msg = null
+                        testing = false
                         nav.popBackStack()
                     } else {
+                        testing = false
                         msg = "登录失败：$err\n请检查地址、密码/授权码及服务器设置"
                     }
                 }
@@ -163,7 +191,108 @@ fun AddAccountScreen(nav: NavHostController) {
         }
         Spacer(Modifier.height(30.dp))
     }
+
+    // Outlook OAuth 网页授权
+    if (showOAuth) {
+        OAuthDialog(onResult = { ok, email_, token, refresh, expire, err ->
+            showOAuth = false
+            scope.launch {
+                if (!ok) {
+                    testing = false
+                    msg = "授权未完成${err?.let { "：$it" } ?: ""}"
+                } else {
+                    val existed = withContext(Dispatchers.IO) { db.accounts().byEmail(email_!!) }
+                    if (existed != null) {
+                        testing = false
+                        msg = "该邮箱（$email_）已添加过了，不能重复添加。"
+                    } else {
+                        val acc = buildAccount(email_, "", nickname.text,
+                            "outlook.office365.com", "993", "smtp-mail.outlook.com", "587", false,
+                            avatarPath, "Outlook/Hotmail", isDefault = false)
+                            .copy(oauthToken = token ?: "", oauthRefresh = refresh ?: "", oauthExpire = expire ?: 0L)
+                        val final = if (withContext(Dispatchers.IO) { db.accounts().all().isEmpty() }) acc.copy(isDefault = true) else acc
+                        withContext(Dispatchers.IO) {
+                            db.accounts().insert(final)
+                            com.rogan.cloudmail.mail.SyncWorker.syncAllNow(ctx)
+                        }
+                        testing = false
+                        msg = null
+                        nav.popBackStack()
+                    }
+                }
+            }
+        })
+    }
 }
+
+/** Microsoft OAuth2 网页授权：APP 内 WebView 完成登录，拦截跳转拿到授权码 */
+@Composable
+fun OAuthDialog(onResult: (ok: Boolean, email: String?, token: String?, refresh: String?, expire: Long?, err: String?) -> Unit) {
+    var loading by remember { mutableStateOf(true) }
+    var err by remember { mutableStateOf<String?>(null) }
+    var done by remember { mutableStateOf(false) }
+
+    AlertDialog(onDismissRequest = { if (!done) onResult(false, null, null, null, null, "用户取消") },
+        title = { Text("微软账号授权登录") },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                androidx.compose.ui.viewinterop.AndroidView(
+                    factory = { vctx ->
+                        android.webkit.WebView(vctx).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            webViewClient = object : android.webkit.WebViewClient() {
+                                override fun shouldOverrideUrlLoading(view: android.webkit.WebView, url: String): Boolean {
+                                    // 授权完成会重定向到 https://localhost/?code=...
+                                    if (url.startsWith("https://localhost")) {
+                                        if (done) return true
+                                        done = true
+                                        val code = java.net.URI(url).let { u ->
+                                            u.rawQuery?.split("&")?.firstOrNull { it.startsWith("code=") }?.substring(5)
+                                        }
+                                        val e2 = url.contains("error=")
+                                        Thread {
+                                            runCatching {
+                                                if (code.isNullOrBlank()) throw Exception(if (e2) "微软返回了错误" else "未获取到授权码")
+                                                val (token, refresh, expire) = MailService.msExchangeToken(code)
+                                                val em = jwtEmail(token) ?: throw Exception("无法从授权结果读取邮箱地址")
+                                                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                                    onResult(true, em, token, refresh, expire, null)
+                                                }
+                                            }.onFailure {
+                                                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                                    onResult(false, null, null, null, null, it.message)
+                                                }
+                                            }
+                                        }.start()
+                                        return true
+                                    }
+                                    return false
+                                }
+                                override fun onPageFinished(view: android.webkit.WebView, u: String) { loading = false }
+                            }
+                            loadUrl(MailService.msAuthorizeUrl())
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(420.dp))
+                if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
+                err?.let { Text(it, color = Color(0xFFEF6C00), fontSize = 13.sp) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { if (!done) onResult(false, null, null, null, null, "用户取消") }) { Text("取消") }
+        })
+}
+
+/** 从 access_token(JWT) 中解析 email / preferred_username */
+fun jwtEmail(token: String): String? = runCatching {
+    val payload = token.split(".")[1]
+        .replace('-', '+').replace('_', '/')
+    val padded = payload + "=".repeat((4 - payload.length % 4) % 4)
+    val json = String(android.util.Base64.decode(padded, android.util.Base64.DEFAULT))
+    val o = org.json.JSONObject(json)
+    o.optString("preferred_username", o.optString("email", o.optString("unique_name", ""))).ifBlank { null }
+}.getOrNull()
 
 private fun buildAccount(
     email: String, password: String, nickname: String,
@@ -180,7 +309,7 @@ private fun buildAccount(
     nickname = nickname,
     avatarPath = avatar,
     isDefault = isDefault,
-    vcard = VCard(name = nickname).toJson(),
+    vcard = VCard(name = nickname.ifBlank { email.substringBefore("@") }).toJson(),
     cardDefault = false
 )
 
@@ -244,15 +373,21 @@ fun EditAccountScreen(nav: NavHostController, id: Long) {
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(a0.email, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Text("服务商：${a0.provider}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("服务商：${a0.provider}${if (a0.oauthRefresh.isNotBlank()) " · 网页授权登录" else ""}",
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             Spacer(Modifier.height(10.dp))
             OutlinedButton(onClick = { imgPick.launch("image/*") }) { Text("更换头像") }
             Spacer(Modifier.height(8.dp))
             TextField(value = nickname, onValueChange = { nickname = it }, label = { Text("显示昵称") }, modifier = Modifier.fillMaxWidth())
-            TextField(value = password, onValueChange = { password = it }, label = { Text("密码/授权码(可更新)") },
-                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+            if (a0.oauthRefresh.isBlank()) {
+                TextField(value = password, onValueChange = { password = it }, label = { Text("密码/授权码(可更新)") },
+                    visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+            } else {
+                Text("此账号使用微软网页授权登录，无需密码；如需重新授权请删除后重新添加。", fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Switch(checked = isDefault, onCheckedChange = {
                     isDefault = it
@@ -268,7 +403,7 @@ fun EditAccountScreen(nav: NavHostController, id: Long) {
             }
             HorizontalDivider(Modifier.padding(vertical = 10.dp))
             Text("名片(资料卡)信息", fontSize = 15.sp, fontWeight = FontWeight.Bold)
-            Text("开启名片后发送邮件会显示这些信息", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("开启名片后发送邮件会显示这些信息；头像使用上方「更换头像」的图片", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(6.dp))
             Labeled("名片姓名", vcard.name) { vcard = vcard.copy(name = it) }
             Labeled("电话", vcard.phone) { vcard = vcard.copy(phone = it) }
