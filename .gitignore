@@ -1,0 +1,14 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# 签名密钥只存在 GitHub Secrets 中，不进仓库
+keystore.properties
+keystore/
+*.keystore
+*.jks
