@@ -134,7 +134,10 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         }, contentPadding = PaddingValues(4.dp)) { Text("加联系人", fontSize = 11.sp) }
                     }
                 }
-                if (m.ccAddr.isNotBlank()) Text("抄送：${m.ccAddr}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                // 抄送/收件人完整显示，不再截断
+                if (m.toAddr.isNotBlank() && m.folder != "SENT")
+                    Text("收件人：${m.toAddr}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (m.ccAddr.isNotBlank()) Text("抄送：${m.ccAddr}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (m.isAd) Text("此邮件疑似广告邮件", fontSize = 11.sp, color = Color(0xFFEF6C00),
                     modifier = Modifier.padding(top = 2.dp))
                 // 退信提示
