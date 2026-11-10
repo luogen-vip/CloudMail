@@ -131,6 +131,9 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 runCatching {
                     val a = db.accounts().all()
                     a.forEach { com.rogan.cloudmail.mail.MailService.startPush(ctx, it, db) }
+                    // 后台预取最新几封未读正文的完整内容(60 秒节流)：点开邮件基本秒开，
+                    // 之前首次点开要去服务器拉 1~2 秒正文
+                    a.forEach { com.rogan.cloudmail.mail.MailService.prefetchLatest(ctx, it, db) }
                     val u = a.associate { it.id to db.messages().unreadCount(it.id) }
                     val o = db.outbox().all().size
                     val e = db.messages().countAll() == 0
