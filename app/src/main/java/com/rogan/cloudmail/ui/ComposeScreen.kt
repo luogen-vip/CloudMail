@@ -1157,7 +1157,7 @@ fun assetFontFamily(ctx: Context, assetName: String, fallback: androidx.compose.
         val f = File(dir, assetName)
         if (!f.exists() || f.length() == 0L)
             ctx.assets.open("fonts/$assetName").use { ins -> f.outputStream().use { ins.copyTo(it) } }
-        androidx.compose.ui.text.font.Font(android.graphics.Typeface.createFromFile(f))
+        androidx.compose.ui.text.font.Font(f)
             .let { androidx.compose.ui.text.font.FontFamily(it) }
     }.getOrDefault(fallback)
 }
