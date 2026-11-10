@@ -46,6 +46,10 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 cardHtml = cardHtml
             ))
             // 真实发送成功：Transport.send 未抛异常 = 对方 SMTP 服务器已接收
+            // 邮件大小：之前不写 size 列表里就不显示大小(有的显示有的没有)；
+            // 现在按 正文HTML字节数+全部附件文件大小 估算，保证每封已发送邮件都有真实大小可显示
+            val approxSize = item.bodyHtml.toByteArray(Charsets.UTF_8).size +
+                atts.filter { it.cid.isBlank() }.sumOf { java.io.File(it.path).takeIf { f -> f.exists() }?.length() ?: 0L }
             db.messages().insert(MailMessage(
                 accountId = acc.id, folder = "SENT", uid = "local_$mid", messageId = mid,
                 subject = item.subject, fromAddr = acc.email,
@@ -57,7 +61,8 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 bodyHtml = item.bodyHtml + (if (cardHtml.isNotBlank()) "<!--VCARD-->$cardHtml<!--/VCARD-->" else ""),
                 snippet = item.subject, isRead = true, isStarred = false, isAd = false,
                 hasAttachments = atts.isNotEmpty(),
-                attachmentsJson = atts.joinToString(",", "[", "]") { it.toJson() }, loaded = true
+                attachmentsJson = atts.joinToString(",", "[", "]") { it.toJson() }, loaded = true,
+                size = approxSize
             ))
             db.outbox().delete(itemId)
             AppNotify.sendOk(applicationContext, item.subject)
