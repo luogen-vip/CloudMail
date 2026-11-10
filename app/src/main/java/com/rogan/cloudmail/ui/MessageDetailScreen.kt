@@ -317,7 +317,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 }
                             }
                             // 渲染进程崩溃时接管：不让系统杀掉整个 APP，恢复后位置不丢
-                            override fun onRenderProcessGone(view: android.webkit.WebView, detail: android.webkit.WebView.RenderProcessGoneDetail): Boolean {
+                            override fun onRenderProcessGone(view: android.webkit.WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
                                 runCatching {
                                     (view.parent as? android.view.ViewGroup)?.removeView(view)
                                     view.destroy()
