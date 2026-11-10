@@ -33,6 +33,7 @@ fun BrowserScreen(nav: NavHostController, url: String) {
     var title by remember { mutableStateOf(finalUrl.substringAfter("//").substringBefore('/')) }
     var progress by remember { mutableStateOf(0) }
     var reloadKey by remember { mutableStateOf(0) }
+    var crashed by remember { mutableStateOf(false) }
     var wvRef by remember { mutableStateOf<android.webkit.WebView?>(null) }
 
     fun copyLink() {
@@ -68,6 +69,18 @@ fun BrowserScreen(nav: NavHostController, url: String) {
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
             if (progress in 1..99) LinearProgressIndicator(progress = progress / 100f, modifier = Modifier.fillMaxWidth())
+            if (crashed) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("页面渲染异常崩溃", fontSize = 15.sp)
+                        Spacer(Modifier.height(10.dp))
+                        Button(onClick = { crashed = false; reloadKey++ }) { Text("重新加载") }
+                        Spacer(Modifier.height(6.dp))
+                        Text("也可以点右上角用系统浏览器打开", fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            } else androidx.compose.runtime.key(reloadKey) {
             AndroidView(
                 factory = { vctx ->
                     android.webkit.WebView(vctx).apply {
@@ -95,6 +108,17 @@ fun BrowserScreen(nav: NavHostController, url: String) {
                                 title = view.title?.takeIf { it.isNotBlank() }
                                     ?: u.substringAfter("//").substringBefore('/')
                             }
+                            // 渲染进程崩溃接管：有些网站(大量动画/视频/复杂 JS)会让 WebView 渲染进程崩溃，
+                            // 系统默认直接杀掉整个 APP 进程(表现就是 APP 直接消失回桌面)；这里返回 true 接管，
+                            // 只重建 WebView 本身，APP 不退出
+                            override fun onRenderProcessGone(view: android.webkit.WebView, detail: android.webkit.WebView.RenderProcessGoneDetail): Boolean {
+                                runCatching {
+                                    (view.parent as? android.view.ViewGroup)?.removeView(view)
+                                    view.destroy()
+                                }
+                                crashed = true
+                                return true
+                            }
                         }
                         webChromeClient = object : android.webkit.WebChromeClient() {
                             override fun onProgressChanged(view: android.webkit.WebView?, newProgress: Int) {
@@ -109,6 +133,7 @@ fun BrowserScreen(nav: NavHostController, url: String) {
                 },
                 modifier = Modifier.fillMaxSize()
             )
+            }
         }
     }
 }
