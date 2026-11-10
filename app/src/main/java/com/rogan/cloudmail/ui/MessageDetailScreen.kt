@@ -28,7 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun MessageDetailScreen(nav: NavHostController, id: Long) {
     val ctx = LocalContext.current
@@ -80,7 +80,10 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
-                title = { Text("邮件详情", fontSize = 18.sp) },
+                // 标题不换行：之前已发送邮件顶栏图标多，标题被挤成很窄一条，
+                // “邮件详情”四个字被折成竖排两列(看起来就是置顶按钮左边多出竖着的“件详”两个字)
+                title = { Text("邮件详情", fontSize = 18.sp, maxLines = 1,
+                    softWrap = false, overflow = TextOverflow.Ellipsis) },
                 navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } },
                 actions = {
                     if (m != null) {
@@ -364,8 +367,11 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 TextButton(onClick = { openWithProvider(ctx, File(a.path), a.mime, a.name) }) { Text("打开", fontSize = 12.sp) }
                                 TextButton(onClick = {
                                     scope.launch(Dispatchers.IO) {
-                                        val saved = saveToDownloads(File(a.path), File(a.path).name)
-                                        withContext(Dispatchers.Main) { toast = "已保存到下载文件夹：${saved.name}" }
+                                        // 真正保存到公共目录(图片进相册、文件进「下载」)，并如实提示结果；
+                                        // 失败时把原因显示出来，不再“提示成功但图库/下载里找不到”
+                                        val msg = runCatching { saveAttachment(ctx, File(a.path), a.name, a.mime) }
+                                            .getOrElse { "保存失败：${it.message ?: "未知错误(可能文件已损坏或没有存储权限)"}" }
+                                        withContext(Dispatchers.Main) { toast = msg }
                                     }
                                 }) { Text("保存", fontSize = 12.sp) }
                             }
@@ -385,8 +391,12 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 confirmButton = {
                     TextButton(onClick = {
                         scope.launch(Dispatchers.IO) {
-                            val saved = saveToDownloads(File(img.path), img.name)
-                            withContext(Dispatchers.Main) { toast = "已保存到下载文件夹：${saved.name}" }
+                            val msg = runCatching {
+                                saveAttachment(ctx, File(img.path), img.name,
+                                    AttInfo.fromJson(m.attachmentsJson).firstOrNull { it.path == img.path }?.mime
+                                        ?: guessMime(img.name))
+                            }.getOrElse { "保存失败：${it.message ?: "未知错误"}" }
+                            withContext(Dispatchers.Main) { toast = msg }
                         }
                     }) { Text("保存到相册/下载") }
                 },
@@ -557,20 +567,31 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             Text("当前没有设置提醒。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        // 快捷选项一屏排开(不再需要往下滑才看到确认按钮)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             listOf("10分钟" to 10L, "30分钟" to 30L).forEach { (name, min) ->
                                 OutlinedButton(onClick = {
                                     com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, System.currentTimeMillis() + min * 60_000)
                                     hasReminder = true
                                     toast = "已设置：${min}分钟后提醒这封邮件"
-                                }) { Text(name, fontSize = 12.sp) }
+                                    showRemind = false
+                                }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) { Text(name, fontSize = 12.sp) }
                             }
                             OutlinedButton(onClick = {
+                                com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, System.currentTimeMillis() + 60 * 60_000)
+                                hasReminder = true
+                                toast = "已设置：1小时后提醒这封邮件"
+                                showRemind = false
+                            }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) { Text("1小时", fontSize = 12.sp) }
+                            if (hasReminder) OutlinedButton(onClick = {
                                 com.rogan.cloudmail.mail.ReminderWorker.cancel(ctx, m.id)
                                 hasReminder = false
                                 toast = "已取消这封邮件的稍后提醒，之后可重新设定"
-                            }) { Text("取消提醒", fontSize = 12.sp, color = Color(0xFFEF6C00)) }
+                            }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                                Text("取消提醒", fontSize = 12.sp, color = Color(0xFFEF6C00)) }
                         }
+                        Spacer(Modifier.height(10.dp))
+                        HorizontalDivider()
                         Spacer(Modifier.height(6.dp))
                         Text("自定义提醒时间(想提多久都可以，含年月日)：", fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -581,20 +602,24 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         com.rogan.cloudmail.ui.Stepper("小时", rh, 0, 23) { rh = it }
                         com.rogan.cloudmail.ui.Stepper("分钟", rmi, 0, 59) { rmi = it }
                         Text("将提醒：${fmtFull(target)}", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                        TextButton(onClick = {
-                            when {
-                                dateBad -> toast = "$rmo 月没有 $rdy 日，请修改日期"
-                                target <= System.currentTimeMillis() -> toast = "所选时间已经过去了，请往后调"
-                                else -> {
-                                    com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, target)
-                                    hasReminder = true
-                                    toast = "已设置：${fmtFull(target)} 提醒这封邮件"
-                                }
-                            }
-                        }) { Text("按这个时间提醒") }
                     }
                 },
-                confirmButton = { TextButton(onClick = { showRemind = false }) { Text("关闭") } })
+                // 「按这个时间提醒」放在弹窗固定按钮区，一眼就能看到、不用滚动去找
+                confirmButton = {
+                    TextButton(onClick = {
+                        when {
+                            dateBad -> toast = "$rmo 月没有 $rdy 日，请修改日期"
+                            target <= System.currentTimeMillis() -> toast = "所选时间已经过去了，请往后调"
+                            else -> {
+                                com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, target)
+                                hasReminder = true
+                                toast = "已设置：${fmtFull(target)} 提醒这封邮件"
+                                showRemind = false
+                            }
+                        }
+                    }) { Text("按这个时间提醒") }
+                },
+                dismissButton = { TextButton(onClick = { showRemind = false }) { Text("关闭") } })
         }
         // 标签对话框：勾选/取消该邮件所属标签；还没有标签时可直接新建，邮件自动加入
         if (showLabels) {
