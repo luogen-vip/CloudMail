@@ -171,6 +171,12 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
+                }
+                // 功能按钮改成自动换行的 FlowRow(单独一行)：之前全挤在发件人那一行，
+                // 发件人名字一长「稍后提醒」就被挤出屏幕外看不见(是布局裁掉了，功能还在)；
+                // 现在一行放不下会自动折到下一行，备注/加联系人/标签/往来邮件/稍后提醒全部可见
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(0.dp),
+                    modifier = Modifier.fillMaxWidth()) {
                     if (m.folder == "INBOX") {
                         TextButton(onClick = { showRemark = true }, contentPadding = PaddingValues(4.dp)) {
                             Text(if (contact?.remark.isNullOrBlank()) "备注" else "改备注", fontSize = 11.sp)
