@@ -14,6 +14,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
@@ -672,7 +673,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 }
             } else {
                 val overflow = info.offset + info.size + 60 - bodyListState.layoutInfo.viewportSize.height
-                if (overflow > 0) scrollScope.launch { runCatching { androidx.compose.foundation.gestures.animateScrollBy(bodyListState, overflow.toFloat()) } }
+                if (overflow > 0) scrollScope.launch { runCatching { bodyListState.scroll { animateScrollBy(overflow.toFloat()) } } }
             }
         }
         LaunchedEffect(imeBottom, focusBlockId) {
