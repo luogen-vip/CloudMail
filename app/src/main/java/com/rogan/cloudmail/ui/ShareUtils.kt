@@ -16,7 +16,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.coroutines.resume
 
-/** 分享/导出工具：系统分享、导出 EML / HTML / 长图、复制摘要。
+/** 分享/导出工具：系统分享、导出 EML / HTML / 长图、复制摘要、保存到下载文件夹。
  *  导出的文件放在 cacheDir/exports 下，通过 FileProvider 分享给微信/QQ 等(不依赖任何服务器) */
 object ShareUtils {
 
@@ -91,17 +91,14 @@ object ShareUtils {
         sb.append("MIME-Version: 1.0\r\n")
         sb.append("Content-Type: multipart/related; boundary=\"$boundary\"\r\n\r\n")
 
-        // 正文 html 部分
-        var html = m.bodyHtml.ifBlank { "<p>(无正文内容)</p>" }
+        val html = m.bodyHtml.ifBlank { "<p>(无正文内容)</p>" }
         val inlineAtts = atts.filter { it.isInline && it.cid.isNotBlank() && File(it.path).exists() }
-        inlineAtts.forEach { a -> /* cid 保留，图片在下方以 base64 内联资源出现 */ }
         sb.append("--$boundary\r\n")
         sb.append("Content-Type: text/html; charset=utf-8\r\n")
         sb.append("Content-Transfer-Encoding: 8bit\r\n\r\n")
         sb.append(html.replace("\r\n", "\n").replace("\n", "\r\n"))
         sb.append("\r\n")
 
-        // 内联图片(base64)
         inlineAtts.forEach { a ->
             val data = Base64.getEncoder().encodeToString(File(a.path).readBytes())
             sb.append("--$boundary\r\n")
@@ -111,7 +108,6 @@ object ShareUtils {
             sb.append("Content-Disposition: inline; filename=\"${a.name}\"\r\n\r\n")
             data.chunked(76).forEach { sb.append(it).append("\r\n") }
         }
-        // 普通附件(base64)
         atts.filter { !it.isInline && File(it.path).exists() }.forEach { a ->
             val data = Base64.getEncoder().encodeToString(File(a.path).readBytes())
             sb.append("--$boundary\r\n")
@@ -154,7 +150,47 @@ object ShareUtils {
         }
     }
 
-    /** 正文渲染成长图(清晰完整)：离屏 WebView 按内容高度渲染成一张 PNG */
+    /** 保存导出的文件到手机的「下载」文件夹(不需要存储权限)：
+     *  Android 10+ 走 MediaStore.Downloads；更旧版本直接写公共 Download 目录，失败则退回应用私有外部目录 */
+    fun saveToDownloads(ctx: Context, f: File, mime: String): String = runCatching {
+        val mime2 = mime.ifBlank { "application/octet-stream" }
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, f.name)
+                put(android.provider.MediaStore.Downloads.MIME_TYPE, mime2)
+                put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = ctx.contentResolver
+            val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("无法创建下载条目")
+            resolver.openOutputStream(uri)?.use { os -> f.inputStream().use { it.copyTo(os) } }
+            values.clear()
+            values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            "已保存到手机的「下载」文件夹：${f.name}"
+        } else {
+            val dir = android.os.Environment
+                .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            val out = File(dir, f.name)
+            f.inputStream().use { ins -> out.outputStream().use { ins.copyTo(it) } }
+            "已保存到下载文件夹：${out.absolutePath}"
+        }
+    }.getOrElse {
+        val dir = File(ctx.getExternalFilesDir(null), "Download").apply { mkdirs() }
+        val out = File(dir, f.name)
+        f.inputStream().use { ins -> out.outputStream().use { ins.copyTo(it) } }
+        "已保存到应用文件夹(文件管理器可查看)：${out.absolutePath}"
+    }
+
+    private fun widthPxOf(ctx: Context): Int {
+        val density = ctx.resources.displayMetrics.density
+        return (720 * density).toInt().coerceAtMost(ctx.resources.displayMetrics.widthPixels * 2)
+    }
+
+    /** 正文渲染成长图(清晰完整)：WebView 按内容高度渲染成一张 PNG(含主题/发件人头部)。
+     *  必须把 WebView 临时挂到当前窗口(移到屏幕外，用户看不见)才能真实渲染：
+     *  之前不挂窗口直接 draw，很多机型画出来是空白，表现为“正在生成长图…然后没反应”；
+     *  并加了 15 秒超时，渲染失败时明确提示而不是永远卡住 */
     suspend fun exportLongImage(ctx: Context, m: MailMessage): File? = withContext(Dispatchers.Main) {
         val inlineAtts = AttInfo.fromJson(m.attachmentsJson).filter { it.isInline && it.cid.isNotBlank() }
         var html = m.bodyHtml.ifBlank { "<p style='color:#999'>(无正文内容)</p>" }
@@ -164,39 +200,96 @@ object ShareUtils {
         val full = """
             <html><head><meta charset="utf-8"/>
             <style>body{font-family:sans-serif;padding:16px;color:#222;word-break:break-word;background:#ffffff}
-            img{max-width:100%;height:auto;border-radius:6px} a{color:#1565C0}</style></head>
-            <body>$html</body></html>
+            img{max-width:100%;height:auto;border-radius:6px} a{color:#1565C0}
+            .hdr{border-bottom:1px solid #e0e0e0;padding-bottom:10px;margin-bottom:14px;color:#666;font-size:14px}</style></head>
+            <body><div class="hdr"><b style="color:#111;font-size:17px">${escXml(m.subject.ifBlank { "(无主题)" })}</b><br/>
+            发件人：${escXml(m.fromName.ifBlank { m.fromAddr })} ｜ ${fmtFull(m.date)}</div>$html</body></html>
         """.trimIndent()
         val out = File(exportDir(ctx), safeName(m) + ".png")
-        suspendCancellableCoroutine { cont ->
-            val wv = WebView(ctx)
-            wv.settings.javaScriptEnabled = false
-            wv.settings.allowFileAccess = true
-            wv.settings.loadWithOverviewMode = true
-            wv.settings.useWideViewPort = true
-            val density = ctx.resources.displayMetrics.density
-            val widthPx = (720 * density).toInt().coerceAtMost(
-                ctx.resources.displayMetrics.widthPixels * 2)
-            wv.webViewClient = object : android.webkit.WebViewClient() {
-                override fun onPageFinished(view: WebView, u: String) {
-                    view.post {
-                        val h = (view.contentHeight * view.scale).toInt().coerceAtLeast(200)
-                        try {
-                            val bmp = Bitmap.createBitmap(widthPx, h, Bitmap.Config.ARGB_8888)
-                            val cvs = android.graphics.Canvas(bmp)
-                            cvs.drawColor(android.graphics.Color.WHITE)
-                            view.layout(0, 0, widthPx, h)
-                            view.draw(cvs)
-                            out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                            bmp.recycle()
-                        } catch (e: Throwable) { /* 渲染失败返回 null */ }
-                        wv.destroy()
-                        if (cont.isActive) cont.resume(out.takeIf { it.exists() && it.length() > 0 })
+        // 找到当前 Activity 的根布局，把 WebView 挂上去(移到屏幕外)
+        var c: Context = ctx
+        var act: android.app.Activity? = null
+        while (c is android.content.ContextWrapper) {
+            if (c is android.app.Activity) { act = c; break }
+            c = c.baseContext
+        }
+        val root = act?.window?.decorView as? android.view.ViewGroup
+        val widthPx = widthPxOf(ctx)
+        if (root != null) {
+            renderAttached(root, full, widthPx, out)
+        } else {
+            renderOffscreen(ctx, full, widthPx, out)
+        }
+        out.takeIf { it.exists() && it.length() > 0 }
+    }
+
+    /** 挂到窗口渲染(可靠方案) */
+    private suspend fun renderAttached(root: android.view.ViewGroup, full: String, widthPx: Int, out: File) {
+        kotlinx.coroutines.withTimeoutOrNull(15000) {
+            suspendCancellableCoroutine { cont ->
+                val wv = WebView(root.context)
+                wv.settings.javaScriptEnabled = false
+                wv.settings.allowFileAccess = true
+                val lp = android.widget.FrameLayout.LayoutParams(widthPx,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT)
+                wv.translationY = -100000f // 移到屏幕外，用户看不到
+                root.addView(wv, lp)
+                wv.webViewClient = object : android.webkit.WebViewClient() {
+                    override fun onPageFinished(view: WebView, u: String) {
+                        view.post {
+                            // 量出真实内容高度，再完整画成一张图
+                            view.measure(
+                                android.view.View.MeasureSpec.makeMeasureSpec(widthPx, android.view.View.MeasureSpec.EXACTLY),
+                                android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED))
+                            val h = view.measuredHeight.coerceAtLeast(200)
+                            try {
+                                val bmp = Bitmap.createBitmap(widthPx, h, Bitmap.Config.ARGB_8888)
+                                val cvs = android.graphics.Canvas(bmp)
+                                cvs.drawColor(android.graphics.Color.WHITE)
+                                view.layout(0, 0, widthPx, h)
+                                view.draw(cvs)
+                                out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                                bmp.recycle()
+                            } catch (_: Throwable) { }
+                            root.removeView(wv)
+                            wv.destroy()
+                            if (cont.isActive) cont.resume(Unit)
+                        }
                     }
                 }
+                wv.loadDataWithBaseURL(null, full, "text/html", "utf-8", null)
             }
-            wv.layout(0, 0, widthPx, 400)
-            wv.loadDataWithBaseURL(null, full, "text/html", "utf-8", null)
+        }
+    }
+
+    /** 拿不到窗口时的兜底渲染(老方式，部分机型仍可用) */
+    private suspend fun renderOffscreen(ctx: Context, full: String, widthPx: Int, out: File) {
+        kotlinx.coroutines.withTimeoutOrNull(15000) {
+            suspendCancellableCoroutine { cont ->
+                val wv = WebView(ctx)
+                wv.settings.javaScriptEnabled = false
+                wv.settings.allowFileAccess = true
+                wv.webViewClient = object : android.webkit.WebViewClient() {
+                    override fun onPageFinished(view: WebView, u: String) {
+                        view.post {
+                            val h = (view.contentHeight * view.scale).toInt().coerceAtLeast(200)
+                            try {
+                                val bmp = Bitmap.createBitmap(widthPx, h, Bitmap.Config.ARGB_8888)
+                                val cvs = android.graphics.Canvas(bmp)
+                                cvs.drawColor(android.graphics.Color.WHITE)
+                                view.layout(0, 0, widthPx, h)
+                                view.draw(cvs)
+                                out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                                bmp.recycle()
+                            } catch (_: Throwable) { }
+                            wv.destroy()
+                            if (cont.isActive) cont.resume(Unit)
+                        }
+                    }
+                }
+                wv.layout(0, 0, widthPx, 400)
+                wv.loadDataWithBaseURL(null, full, "text/html", "utf-8", null)
+            }
         }
     }
 }
