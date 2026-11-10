@@ -17,6 +17,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -496,9 +497,24 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             recFile!!.copyTo(target, overwrite = true)
             atts = atts + AttInfo(name, target.absolutePath, "audio/mp4", false, "", dur = secs)
             userEdited = true
-            toast = "录音已添加(${mm}分${ss}秒，${fmtSize(target.length())})，点击即可试听"
+            toast = "录音已添加(${mm}分${ss}秒)"
         } else recFile?.delete()
         recFile = null
+    }
+
+    // 录音/附件「保存」：用系统存储位置选择器(SAF)把文件复制到用户选的目录，
+    // 保存成功后文件既留在邮件附件里、也有了一份本地副本
+    var saveAtt by remember { mutableStateOf<AttInfo?>(null) }
+    val saveDocLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("audio/mp4")) { uri ->
+        val a = saveAtt; saveAtt = null
+        if (uri != null && a != null) {
+            runCatching {
+                ctx.contentResolver.openOutputStream(uri)?.use { os ->
+                    File(a.path).inputStream().use { it.copyTo(os) }
+                }
+            }.onSuccess { toast = "录音已保存到所选位置" }
+                .onFailure { toast = "保存失败：${it.message}" }
+        }
     }
 
     fun removeAtt(a: AttInfo) {
@@ -641,16 +657,27 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         val bodyListState = androidx.compose.foundation.lazy.rememberLazyListState()
         val imeBottom = androidx.compose.foundation.layout.WindowInsets.ime
             .getBottom(androidx.compose.ui.platform.LocalDensity.current)
+        // 键盘跟随(彻底版)：不止键盘弹出时滚一次，而是每次输入/光标落到某个正文块时都检查：
+        // 该块整块不在可视区→按 key 精确滚到它；块底部被键盘/屏幕裁掉→把被裁的部分滚上来。
+        // 这样不管是纯文字、图片/卡片/链接下面接着输入、还是多块混排，输入内容永远在键盘上方可见。
+        fun ensureBlockVisible(id: Long) {
+            val info = bodyListState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == id }
+            if (info == null) {
+                val idx = blocks.indexOfFirst { it.id == id }
+                if (idx >= 0) {
+                    // 固定区块数=账号/收件人/名片行/主题/工具行共 5 个，抄送/密送打开时再多 2 个
+                    val header = 5 + if (showCc) 2 else 0
+                    runCatching { bodyListState.animateScrollToItem(idx + header) }
+                }
+            } else {
+                val overflow = info.offset + info.size + 60 - bodyListState.layoutInfo.viewportSize.height
+                if (overflow > 0) runCatching { bodyListState.animateScrollBy(overflow.toFloat()) }
+            }
+        }
         LaunchedEffect(imeBottom, focusBlockId) {
             if (imeBottom > 0 && focusBlockId != null) {
-                val visible = bodyListState.layoutInfo.visibleItemsInfo.any { it.key == focusBlockId }
-                if (!visible) {
-                    val idx = blocks.indexOfFirst { it.id == focusBlockId }
-                    if (idx >= 0) {
-                        androidx.compose.runtime.withFrameNanos { }
-                        runCatching { bodyListState.animateScrollToItem(idx + 5) } // 前面 5 个固定区块(账号/收件人/抄送/主题/工具行)
-                    }
-                }
+                androidx.compose.runtime.withFrameNanos { }
+                ensureBlockVisible(focusBlockId!!)
             }
         }
         LazyColumn(state = bodyListState, modifier = Modifier.padding(pad).fillMaxSize().imePadding().padding(horizontal = 14.dp)) {
@@ -719,14 +746,21 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 }
             }
             item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { showCc = !showCc }) { Text(if (showCc) "隐藏抄送/密送" else "抄送/密送", fontSize = 13.sp) }
-                    Spacer(Modifier.weight(1f))
+                // FlowRow 自动换行：不管抄送/密送有没有打开，名片开关/「预览」都完整可见可点，
+                // 不再因为一行挤不下被裁掉(之前预览按钮被挤出屏幕，用户以为只有打开抄送才能预览名片)
+                androidx.compose.foundation.layout.FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(0.dp),
+                    verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                    TextButton(onClick = { showCc = !showCc }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
+                        Text(if (showCc) "隐藏抄送/密送" else "抄送/密送", fontSize = 13.sp) }
+                    Spacer(Modifier.width(10.dp))
                     Text("已读回执", fontSize = 13.sp)
                     Switch(checked = readReceipt, onCheckedChange = { readReceipt = it; userEdited = true })
+                    Spacer(Modifier.width(8.dp))
                     Text("名片", fontSize = 13.sp)
                     Switch(checked = cardMode, onCheckedChange = { cardMode = it })
-                    TextButton(onClick = { showCardPreview = true }, contentPadding = PaddingValues(4.dp)) { Text("预览", fontSize = 12.sp) }
+                    TextButton(onClick = { showCardPreview = true }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
+                        Text("名片预览", fontSize = 13.sp) }
                 }
                 Text("名片内容在「设置→点击邮箱账号→名片(资料卡)信息」中编辑", fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp))
@@ -736,11 +770,21 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 item { FieldRow("密送", bcc, { bcc = it; userEdited = true }) }
             }
             item {
-                TextField(value = subject, onValueChange = { subject = it; userEdited = true },
-                    placeholder = { Text("主题") }, modifier = Modifier.fillMaxWidth().height(46.dp),
-                    textStyle = androidx.compose.material3.LocalTextStyle.current.copy(fontSize = 15.sp),
-                    singleLine = true, colors = TextFieldDefaults.colors(
-                        focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
+                // 主题行用 BasicTextField(不带 M3 TextField 的固定内边距)：固定 height(46.dp) 会把
+                // 「主题」两个字纵向裁掉一半，BasicTextField 高度自适应，占位文字完整显示，行高保持紧凑
+                androidx.compose.foundation.text.BasicTextField(
+                    value = subject, onValueChange = { subject = it; userEdited = true },
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurface),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                    decorationBox = { inner ->
+                        androidx.compose.foundation.layout.Box {
+                            if (subject.text.isEmpty()) Text("主题", fontSize = 15.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f))
+                            inner()
+                        }
+                    })
                 HorizontalDivider()
             }
             // 常驻样式工具行(在正文上方，不用滑动就能看到)：图片/文件/卡片 + 字色/字体。
@@ -784,6 +828,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             // 每次输入都记录真实光标位置：插入链接时永远精确落在这里
                             cursorBlockId = b.id; cursorPos = i.selection.end
                             userEdited = true
+                            runCatching { ensureBlockVisible(b.id) } // 每次输入都跟随：光标所在行永远在键盘上方
                         },
                         placeholder = {
                             // 空占位文字只在唯一正文块显示：插入链接/图片后拆出的空块不再显示
@@ -921,6 +966,9 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             if (a.dur > 0) append(" · 时长 ${a.dur / 60}分${a.dur % 60}秒")
                         }, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    if (a.mime.startsWith("audio/")) TextButton(onClick = {
+                        saveAtt = a; saveDocLauncher.launch(a.name)
+                    }) { Text("保存", fontSize = 13.sp) }
                     TextButton(onClick = { removeAtt(a) }) { Text("移除", color = Color(0xFFEF6C00)) }
                 }
             }
@@ -1299,10 +1347,11 @@ fun sniffKind(path: String): String = runCatching {
 }.getOrDefault("")
 
 fun fontLabel(f: String) = when (f) {
-    // 短名(不带括号)：太长的名字在小屏上显示不完整反而看不出选了什么
-    "sans-serif" -> "字体·黑体"; "serif" -> "字体·宋体"; "monospace" -> "字体·等宽"
-    "cursive" -> "字体·楷体"
-    else -> "字体·默认"
+    // 按钮上直接显示所选字体的真实名字(不带头缀/括号)：默认时显示「默认字体」，
+    // 选了哪个立刻变成哪个的名字，一眼看清当前用的字体
+    "sans-serif" -> "黑体"; "serif" -> "宋体"; "monospace" -> "等宽"
+    "cursive" -> "楷体"
+    else -> "默认字体"
 }
 
 /** 字体选项 → 发送 HTML 里的 CSS font-family(真实字体名+各平台回退：收件方电脑/手机上
@@ -1369,8 +1418,8 @@ fun ComposeStyleToolbar(blocks: MutableList<BodyBlock>, cursorBlockId: Long?,
                         maxLines = 1)
                 }
                 DropdownMenu(expanded = fontMenu, onDismissRequest = { fontMenu = false }) {
-                    listOf("" to "默认字体", "sans-serif" to "无衬线", "serif" to "衬线(宋体风)",
-                        "monospace" to "等宽(代码风)", "cursive" to "手写(楷体)").forEach { (v, name) ->
+                    listOf("" to "默认字体", "sans-serif" to "黑体", "serif" to "宋体",
+                        "monospace" to "等宽", "cursive" to "楷体").forEach { (v, name) ->
                         DropdownMenuItem(text = { Text(name, fontSize = 13.sp,
                             fontWeight = if ((curT?.font ?: "") == v) FontWeight.Bold else FontWeight.Normal) },
                             onClick = {
