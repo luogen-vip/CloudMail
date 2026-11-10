@@ -367,7 +367,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 TextButton(onClick = { openWithProvider(ctx, File(a.path), a.mime, a.name) }) { Text("打开", fontSize = 12.sp) }
                                 TextButton(onClick = {
                                     scope.launch(Dispatchers.IO) {
-                                        val saved = ShareUtils.saveToDownloads(ctx, File(a.path), a.name.ifBlank { File(a.path).name }, a.mime)
+                                        val saved = ShareUtils.saveToDownloads(ctx, File(a.path), a.mime, a.name)
                                         withContext(Dispatchers.Main) { toast = saved }
                                     }
                                 }) { Text("保存", fontSize = 12.sp) }
@@ -388,7 +388,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 confirmButton = {
                     TextButton(onClick = {
                         scope.launch(Dispatchers.IO) {
-                            val saved = ShareUtils.saveToDownloads(ctx, File(img.path), img.name, "")
+                            val saved = ShareUtils.saveToDownloads(ctx, File(img.path), "", img.name)
                             withContext(Dispatchers.Main) { toast = saved }
                         }
                     }) { Text("保存到相册/下载") }
