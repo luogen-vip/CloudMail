@@ -150,41 +150,70 @@ object ShareUtils {
         }
     }
 
-    /** 保存导出的文件到手机的「下载」文件夹(不需要存储权限)：
-     *  Android 10+ 走 MediaStore.Downloads；更旧版本直接写公共 Download 目录，失败则退回应用私有外部目录 */
+    /** 保存文件到手机(不需要存储权限)：
+     *  - 图片 → MediaStore.Images(Pictures/CloudMail)，图库里能直接看到；
+     *  - 视频 → MediaStore.Video(Movies/CloudMail)；
+     *  - 其他文件 → MediaStore.Downloads(Download/CloudMail)，文件管理器里能找到。
+     *  之前用 File API 直接写公共 Download 目录，Android 10+ 有限制，容易“提示保存成功但实际没写进去”；
+     *  现在全部走 MediaStore，写入成功才提示成功，失败会给出真实原因 */
     fun saveToDownloads(ctx: Context, f: File, mime: String): String = runCatching {
-        val mime2 = mime.ifBlank { "application/octet-stream" }
+        if (!f.exists() || f.length() == 0L)
+            return@runCatching "保存失败：文件不存在或为空(${f.name})，可能是正文还没加载完，请重新打开这封邮件再试"
+        val mime2 = mime.ifBlank { guessMime(f.name) }
+        val resolver = ctx.contentResolver
         if (android.os.Build.VERSION.SDK_INT >= 29) {
             val values = android.content.ContentValues().apply {
-                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, f.name)
-                put(android.provider.MediaStore.Downloads.MIME_TYPE, mime2)
-                put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, f.name)
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime2)
+                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val resolver = ctx.contentResolver
-            val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: throw IllegalStateException("无法创建下载条目")
-            resolver.openOutputStream(uri)?.use { os -> f.inputStream().use { it.copyTo(os) } }
+            val isImg = mime2.startsWith("image/")
+            val isVid = mime2.startsWith("video/")
+            val uri = if (isImg) {
+                values.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CloudMail")
+                resolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            } else if (isVid) {
+                values.put(android.provider.MediaStore.Video.Media.RELATIVE_PATH, "Movies/CloudMail")
+                resolver.insert(android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            } else {
+                values.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/CloudMail")
+                resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            } ?: throw IllegalStateException("无法创建保存条目")
+            val os = resolver.openOutputStream(uri) ?: throw IllegalStateException("无法写入文件")
+            os.use { outs -> f.inputStream().use { ins -> ins.copyTo(outs) } }
             values.clear()
-            values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+            values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
-            "已保存到手机的「下载」文件夹：${f.name}"
+            when {
+                isImg -> "已保存到图库(相册里的 Pictures/CloudMail)：${f.name}"
+                isVid -> "已保存到视频库(Movies/CloudMail)：${f.name}"
+                else -> "已保存到手机「下载/CloudMail」文件夹(文件管理器里能找到)：${f.name}"
+            }
         } else {
-            val dir = android.os.Environment
-                .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-            val out = File(dir, f.name)
-            f.inputStream().use { ins -> out.outputStream().use { ins.copyTo(it) } }
-            "已保存到下载文件夹：${out.absolutePath}"
+            val dir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS), "CloudMail")
+            dir.mkdirs()
+            val out = java.io.File(dir, f.name)
+            f.inputStream().use { ins -> out.outputStream().use { outs -> ins.copyTo(outs) } }
+            android.media.MediaScannerConnection.scanFile(ctx, arrayOf(out.absolutePath), arrayOf(mime2), null)
+            if (mime2.startsWith("image/")) "已保存到下载/CloudMail(图库稍后自动收录)：${out.absolutePath}"
+            else "已保存到下载/CloudMail：${out.absolutePath}"
         }
     }.getOrElse {
         val dir = File(ctx.getExternalFilesDir(null), "Download").apply { mkdirs() }
         val out = File(dir, f.name)
-        f.inputStream().use { ins -> out.outputStream().use { ins.copyTo(it) } }
-        "已保存到应用文件夹(文件管理器可查看)：${out.absolutePath}"
+        runCatching { f.inputStream().use { ins -> out.outputStream().use { outs -> ins.copyTo(it) } } }
+        if (out.exists() && out.length() > 0) "已保存到应用文件夹(文件管理器→Android/data/com.rogan.cloudmail/files/Download)：${f.name}"
+        else "保存失败：${it.message ?: "未知错误"}，请重试"
     }
 
     private fun widthPxOf(ctx: Context): Int {
         val density = ctx.resources.displayMetrics.density
-        return (720 * density).toInt().coerceAtMost(ctx.resources.displayMetrics.widthPixels * 2)
+        // 上限 1080 物理像素：之前 720dp*density 在高分屏上是 2000+ 像素宽，
+        // 乘上长邮件的高度后位图内存过大，易导致下半部分渲染失败留白
+        return (720 * density).toInt()
+            .coerceAtMost(ctx.resources.displayMetrics.widthPixels * 2)
+            .coerceAtMost(1080)
     }
 
     /** 正文渲染成长图(清晰完整)：WebView 按内容高度渲染成一张 PNG(含主题/发件人头部)。
@@ -249,20 +278,36 @@ object ShareUtils {
                                 view.post {
                                     val h2 = lastH.coerceAtLeast(200)
                                     try {
-                                        val bmp = Bitmap.createBitmap(widthPx, h2, Bitmap.Config.ARGB_8888)
-                                        val cvs = android.graphics.Canvas(bmp)
-                                        cvs.drawColor(android.graphics.Color.WHITE)
+                                        // 关键修复“长图下半空白”：WebView 只渲染可视区域，
+                                        // 直接 draw 时屏外的下半部分是空白。改用软件图层(SOFTWARE)
+                                        // 强制 WebView 把整页光栅化后再 draw，保证从头到尾全部有内容
+                                        view.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+                                        // 位图内存保护：面积超过 4000 万像素时压缩宽度
+                                        val w = if (widthPx.toLong() * h2 > 40_000_000L) (40_000_000L / h2).toInt() else widthPx
                                         view.measure(
-                                            android.view.View.MeasureSpec.makeMeasureSpec(widthPx, android.view.View.MeasureSpec.EXACTLY),
+                                            android.view.View.MeasureSpec.makeMeasureSpec(w, android.view.View.MeasureSpec.EXACTLY),
                                             android.view.View.MeasureSpec.makeMeasureSpec(h2, android.view.View.MeasureSpec.EXACTLY))
-                                        view.layout(0, 0, widthPx, h2)
-                                        view.draw(cvs)
-                                        out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                                        bmp.recycle()
-                                    } catch (_: Throwable) { }
-                                    root.removeView(wv)
-                                    wv.destroy()
-                                    if (cont.isActive) cont.resume(Unit)
+                                        view.layout(0, 0, w, h2)
+                                        // 先滚到底再回顶：触发懒加载内容(远程图片/字体)全部加载，并强制整页重绘
+                                        view.scrollTo(0, h2); view.scrollTo(0, 0)
+                                        view.postDelayed({
+                                            try {
+                                                val bmp = Bitmap.createBitmap(w, h2, Bitmap.Config.ARGB_8888)
+                                                val cvs = android.graphics.Canvas(bmp)
+                                                cvs.drawColor(android.graphics.Color.WHITE)
+                                                view.draw(cvs)
+                                                out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                                                bmp.recycle()
+                                            } catch (_: Throwable) { }
+                                            root.removeView(wv)
+                                            wv.destroy()
+                                            if (cont.isActive) cont.resume(Unit)
+                                        }, 400)
+                                    } catch (_: Throwable) {
+                                        root.removeView(wv)
+                                        wv.destroy()
+                                        if (cont.isActive) cont.resume(Unit)
+                                    }
                                 }
                             } else view.postDelayed({ tick() }, 400)
                         }
