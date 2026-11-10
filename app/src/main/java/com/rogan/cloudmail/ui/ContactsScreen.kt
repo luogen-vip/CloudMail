@@ -59,7 +59,9 @@ fun ContactsScreen(nav: NavHostController) {
                     list.clear(); list.addAll(others + digitsInOrder)
                 }
             }
-            2 -> list.sortByDescending { it.createdAt }
+            // 按添加时间：最早添加的在最上面，后面依次往下(第一次加的排第一，符合直觉)，
+            // 重要联系人优先仍然生效
+            2 -> list.sortBy { it.createdAt }
         }
         if (importantFirst) {
             val imp = list.filter { it.isImportant }
