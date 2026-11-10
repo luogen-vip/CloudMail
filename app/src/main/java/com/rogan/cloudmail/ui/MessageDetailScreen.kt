@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +48,10 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
     var m0 by remember { mutableStateOf<MailMessage?>(null) }
     var recallResult by remember { mutableStateOf<String?>(null) }
     var loadKey by remember { mutableStateOf(0) } // 失败重试：+1 后重新拉取正文
+    var showShare by remember { mutableStateOf(false) }
+    var showRemind by remember { mutableStateOf(false) }
+    var busyShare by remember { mutableStateOf(false) }
+    var htmlExported by remember { mutableStateOf<File?>(null) }
 
     // 提示条用 Scaffold 标准 SnackbarHost：之前直接放内容层顶部被顶栏遮住看不见
     val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
@@ -79,6 +84,18 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } },
                 actions = {
                     if (m != null) {
+                        // 置顶/取消置顶：置顶邮件在所有列表最上面，多封按置顶时间依次排序
+                        IconButton(onClick = {
+                            scope.launch {
+                                val nv = if (m.pinnedAt > 0) 0L else System.currentTimeMillis()
+                                db.messages().setPinned(m.id, nv)
+                                msg = m.copy(pinnedAt = nv)
+                                m0 = m0?.copy(pinnedAt = nv)
+                                toast = if (nv > 0) "已置顶，会显示在列表最上面" else "已取消置顶"
+                            }
+                        }) { Icon(Icons.Default.PushPin, if (m.pinnedAt > 0) "取消置顶" else "置顶",
+                            tint = if (m.pinnedAt > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
+                        IconButton(onClick = { showShare = true }) { Icon(Icons.Default.Share, "分享/导出") }
                         IconButton(onClick = {
                             if (starBusy) return@IconButton
                             starBusy = true
@@ -99,6 +116,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         }) { Icon(Icons.Default.Reply, "回复") }
                         IconButton(onClick = { nav.navigate("forward/${m.id}") }) { Icon(Icons.Default.Shortcut, "转发") }
                         if (m.folder == "SENT") {
+                            IconButton(onClick = { nav.navigate("reedit/${m.id}") }) { Icon(Icons.Default.Edit, "再次编辑：原样带入收件人/主题/正文") }
                             IconButton(onClick = { confirmRecall = true }) { Icon(Icons.Default.Undo, "撤回") }
                         }
                         IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Default.Delete, "删除") }
@@ -155,6 +173,17 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                     TextButton(onClick = { showLabels = true }, contentPadding = PaddingValues(4.dp)) {
                         Text("标签", fontSize = 11.sp)
                     }
+                    // 往来邮件：一键查看和这个地址的全部往来(我发的+TA发的)
+                    TextButton(onClick = {
+                        val addr = if (m.folder == "SENT") m.toAddr.substringBefore(",").trim() else m.fromAddr
+                        if (addr.isNotBlank()) nav.navigate("conv/" + android.net.Uri.encode(addr))
+                    }, contentPadding = PaddingValues(4.dp)) {
+                        Text("往来邮件", fontSize = 11.sp)
+                    }
+                    // 稍后提醒：到点后系统通知再把这封邮件提醒一遍(点击直达本邮件)
+                    TextButton(onClick = { showRemind = true }, contentPadding = PaddingValues(4.dp)) {
+                        Text("稍后提醒", fontSize = 11.sp)
+                    }
                 }
                 // 收件人/抄送：默认折叠成一行，不挤占头部；点“展开”看完整收件人/抄送详情，
                 // 保证下方正文浏览区始终足够大
@@ -184,6 +213,8 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 // 退信提示(判断逻辑与列表/通知共用同一个函数，保证三处一致)；
                 // 并解析退信正文给出具体失败原因(域名不存在/地址不存在/已满/被拒收…)
                 if (isBounceMail(m.fromAddr, m.subject)) {
+                    // 紧凑横幅：默认只占 2 行，点一下展开全部原因；不把正文滑动区挤得只剩一小块
+                    var bounceOpen by remember(m.id) { mutableStateOf(false) }
                     val reason = remember(m.id, m.bodyHtml) {
                         bounceReason(m.snippet + " " + m.bodyHtml.take(8000))
                     }
@@ -191,11 +222,16 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         bounceFailedAddr(m.snippet + " " + m.bodyHtml.take(8000))
                     }
                     Text(buildString {
-                        append("⚠ 这是退信通知：你之前发送的邮件没有真正送达。原因：$reason")
-                        if (fa != null) append("\n失败地址：$fa")
-                        append("\n(下方正文是服务器退信原文)")
+                        append("⚠ 退信：邮件未真正送达。原因：$reason")
+                        if (fa != null) append("｜失败地址：$fa")
                     }, fontSize = 12.sp, color = Color(0xFFD32F2F), fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 4.dp))
+                        maxLines = if (bounceOpen) Int.MAX_VALUE else 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth().clickable { bounceOpen = !bounceOpen }
+                            .padding(top = 4.dp))
+                    Text(if (bounceOpen) "收起 ▴(下方正文是服务器退信原文)" else "展开详情 ▾",
+                        fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.clickable { bounceOpen = !bounceOpen }.padding(top = 1.dp))
                 }
             }
             HorizontalDivider()
@@ -216,11 +252,18 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         setBackgroundColor(android.graphics.Color.TRANSPARENT)
                         webViewClient = object : android.webkit.WebViewClient() {
                             override fun shouldOverrideUrlLoading(view: android.webkit.WebView, url: String): Boolean {
-                                if (url.startsWith("http://") || url.startsWith("https://")) {
-                                    runCatching { viewCtx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)) ) }
-                                    return true
+                                when {
+                                    // 邮件里的链接默认用内置浏览器打开：不跳出 APP，返回键即回到邮件正文
+                                    url.startsWith("http://") || url.startsWith("https://") -> {
+                                        nav.navigate("browser/" + android.net.Uri.encode(url))
+                                        return true
+                                    }
+                                    // mailto:/tel: 等特殊协议交给系统处理
+                                    else -> {
+                                        runCatching { viewCtx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))) }
+                                        return true
+                                    }
                                 }
-                                return false
                             }
                         }
                         // 点击正文中的图片 → 全屏预览/保存。
@@ -396,6 +439,106 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 title = { Text(if (r.startsWith("撤回成功")) "✓ 撤回成功" else "撤回结果") },
                 text = { Text(r, fontSize = 14.sp) },
                 confirmButton = { TextButton(onClick = { recallResult = null }) { Text("知道了") } })
+        }
+        // 分享/导出面板：系统分享、复制摘要、导出 EML/HTML/长图(全部本地完成，不需要服务器)
+        if (showShare) {
+            AlertDialog(onDismissRequest = { if (!busyShare) showShare = false },
+                title = { Text("分享 / 导出") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("「分享」会弹出微信/QQ 等面板，直接把邮件内容发过去；导出的文件也可在分享面板里选应用发送。",
+                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        TextButton(onClick = { ShareUtils.shareText(ctx, m); showShare = false }) {
+                            Icon(Icons.Default.Share, null, Modifier.size(16.dp)); Text(" 系统分享(微信/QQ/短信…)") }
+                        TextButton(onClick = {
+                            ShareUtils.copyToClipboard(ctx, ShareUtils.summaryText(m))
+                            toast = "已复制：主题+发件人+正文，可直接粘贴"; showShare = false
+                        }) { Icon(Icons.Default.ContentCopy, null, Modifier.size(16.dp)); Text(" 复制邮件摘要/全部内容") }
+                        HorizontalDivider()
+                        TextButton(onClick = {
+                            showShare = false
+                            scope.launch(Dispatchers.IO) {
+                                val f = ShareUtils.exportEml(ctx, m, acc)
+                                withContext(Dispatchers.Main) { ShareUtils.shareFile(ctx, f, "application/octet-stream"); toast = "已导出 EML：${f.name}" }
+                            }
+                        }) { Icon(Icons.Default.Email, null, Modifier.size(16.dp)); Text(" 导出为 EML 邮件文件") }
+                        TextButton(onClick = {
+                            showShare = false
+                            scope.launch(Dispatchers.IO) {
+                                val f = ShareUtils.exportHtml(ctx, m)
+                                withContext(Dispatchers.Main) { htmlExported = f }
+                            }
+                        }) { Icon(Icons.Default.Code, null, Modifier.size(16.dp)); Text(" 导出为 HTML 网页文件") }
+                        TextButton(onClick = {
+                            showShare = false; busyShare = true
+                            toast = "正在生成长图…"
+                            scope.launch(Dispatchers.IO) {
+                                val f = ShareUtils.exportLongImage(ctx, m)
+                                withContext(Dispatchers.Main) {
+                                    busyShare = false
+                                    if (f != null) { ShareUtils.shareFile(ctx, f, "image/png"); toast = "长图已生成：${f.name}" }
+                                    else toast = "长图生成失败，请重试"
+                                }
+                            }
+                        }) { Icon(Icons.Default.Image, null, Modifier.size(16.dp)); Text(" 导出为长图(清晰完整)") }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { showShare = false }) { Text("关闭") } })
+        }
+        // HTML 导出完成后的选择：直接用浏览器打开，或分享给其他应用
+        htmlExported?.let { f ->
+            AlertDialog(onDismissRequest = { htmlExported = null },
+                title = { Text("已导出 HTML") },
+                text = { Text("文件：${f.name}\n\n可以直接用浏览器打开(离线可看，样式与邮件一致)，也可以分享给微信/QQ 等应用。") },
+                confirmButton = { TextButton(onClick = { ShareUtils.openFile(ctx, f, "text/html"); htmlExported = null }) { Text("用浏览器打开") } },
+                dismissButton = { TextButton(onClick = { ShareUtils.shareFile(ctx, f, "text/html"); htmlExported = null }) { Text("分享给其他应用") } })
+        }
+        // 稍后提醒：选一个时间，到点系统通知把这封邮件再提醒一遍(点击直达邮件)
+        if (showRemind) {
+            var customMin by remember { mutableStateOf(TextFieldValue("30")) }
+            AlertDialog(onDismissRequest = { showRemind = false },
+                title = { Text("稍后提醒") },
+                text = {
+                    Column {
+                        Text("到点后 APP 会发一条提醒通知，点开就是这封邮件(即使 APP 已关闭后台也生效)。",
+                            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf("10分钟" to 10L, "30分钟" to 30L, "1小时" to 60L).forEach { (name, min) ->
+                                OutlinedButton(onClick = {
+                                    com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, System.currentTimeMillis() + min * 60_000)
+                                    showRemind = false
+                                    toast = "已设置：${min}分钟后提醒这封邮件"
+                                }) { Text(name, fontSize = 12.sp) }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(onClick = {
+                                val c = java.util.Calendar.getInstance()
+                                c.add(java.util.Calendar.DAY_OF_YEAR, 1)
+                                c.set(java.util.Calendar.HOUR_OF_DAY, 9)
+                                c.set(java.util.Calendar.MINUTE, 0)
+                                c.set(java.util.Calendar.SECOND, 0)
+                                com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, c.timeInMillis)
+                                showRemind = false
+                                toast = "已设置：明天早上9点提醒这封邮件"
+                            }) { Text("明天早上9点", fontSize = 12.sp) }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextField(value = customMin, onValueChange = { customMin = it }, singleLine = true,
+                                modifier = Modifier.weight(1f), placeholder = { Text("自定义分钟数，如 45") })
+                            TextButton(onClick = {
+                                val n = customMin.text.trim().toLongOrNull()
+                                if (n == null || n <= 0) { toast = "请输入正整数分钟数"; return@TextButton }
+                                com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, System.currentTimeMillis() + n * 60_000)
+                                showRemind = false
+                                toast = "已设置：${n}分钟后提醒这封邮件"
+                            }) { Text("设定") }
+                        }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { showRemind = false }) { Text("关闭") } })
         }
         // 标签对话框：勾选/取消该邮件所属标签；还没有标签时可直接新建，邮件自动加入
         if (showLabels) {
