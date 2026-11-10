@@ -108,6 +108,52 @@ fun isBounceMail(fromAddr: String, subject: String): Boolean =
             subject.contains("Returned mail", true) ||
             subject.contains("Delivery Status", true)
 
+/** 从退信正文解析出具体失败原因(中文说明)：域名不存在/收件地址不存在/邮箱已满/被拒收/暂时无法连接。
+ *  邮件协议下 SMTP 服务器先受理、之后才异步回发退信(DSN)，所以"已发送"并不代表真的送达；
+ *  APP 收到退信后用这个函数把服务器给的英文错误翻译成用户看得懂的原因 */
+fun bounceReason(body: String): String {
+    // 去 HTML 标签/压缩空白，只留纯文本再匹配关键词
+    val b = body.replace(Regex("<[^>]{1,300}>"), " ")
+        .replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        .replace(Regex("\\s+"), " ")
+    fun has(p: String): Boolean = runCatching { Regex(p, RegexOption.IGNORE_CASE).containsMatchIn(b) }.getOrDefault(false)
+    return when {
+        // 1. 域名问题最优先：@ 后面的域名根本不存在/DNS 解析不到
+        has("Host or domain name not found|Name or service not known|domain not found|" +
+                "domain [^. ]{1,60} (?:does not |)exist|unknown domain|NXDOMAIN|" +
+                "no.{0,15}(?:MX|mail exchanger)|DNS Lookup Failed|unrouteable address") ->
+            "收件域名不存在或无法解析（请核对邮箱 @ 后面的部分是否写错）"
+        // 2. 收件账号不存在（550 user unknown 是最常见的退信）
+        has("user unknown|unknown user|unknown recipient|no such (?:user|mailbox|address|recipient)|" +
+                "user (?:not found|doesn't exist|does not exist)|recipient (?:not found|unknown|rejected)|" +
+                "address (?:does not exist|not exist|rejected|invalid)|invalid (?:recipient|mailbox|address)|" +
+                "bad destination|non-?existent|mailbox unavailable|recipient deferred|" +
+                "address not found|mailbox not found|not our customer") ->
+            "收件邮箱地址不存在（对方服务器确认没有这个账号）"
+        // 3. 邮箱已满
+        has("quota|mailbox (?:is )?full|over ?quota|insufficient (?:storage|system storage)|storage exceeded") ->
+            "对方邮箱已满，暂时收不下新邮件"
+        // 4. 被拒收/被判为垃圾邮件
+        has("spam|blacklist|black ?list|block ?list|blocked|banned|policy|denied|refused|" +
+                "not allowed|security|authentication|filter") ->
+            "被对方服务器拒收（可能被判为垃圾邮件或被对方策略拦截）"
+        // 5. 临时故障（4xx 类：稍后服务器会自动重试投递）
+        has("timed? ?out|time ?out|connection (?:refused|failed|reset|dropped)|unreachable|" +
+                "temporar|try (?:again )?later|greylist|deferr|\\b4\\d\\d\\b") ->
+            "对方服务器暂时无法连接，系统稍后会自动重试投递"
+        // 6. 其他永久失败(5xx)
+        has("\\b5\\d\\d\\b") ->
+            "对方服务器拒绝接收（错误码 5xx，邮件未送达）"
+        else -> "对方服务器退回了邮件（未能成功送达）"
+    }
+}
+
+/** 从退信正文里提取失败的收件地址(第一条 @ 地址)，找不到返回 null */
+fun bounceFailedAddr(body: String): String? {
+    val b = body.replace(Regex("<[^>]{1,300}>"), " ")
+    return Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}").find(b)?.value
+}
+
 fun saveToDownloads(src: File, name: String): File {
     val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
     dir.mkdirs()
