@@ -313,6 +313,28 @@ object MailService {
 
     /** 拉取完整正文+附件到本地，返回更新后的实体。
      *  复用长连接(不再每次新建 SSL+登录，省 2~5 秒)：首次打开正文明显更快 */
+    // 正文预取节流：同一账号 60 秒内只跑一轮，避免频繁占用 IMAP 连接
+    private val prefetchAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** 后台预取最近未拉取正文的收件箱邮件(默认最新 3 封)：点开邮件时正文已在本地，基本秒开。
+     *  之前首次点开一封邮件要等 1~2 秒(实时去服务器拉正文)，尤其是刚收到的新邮件。 */
+    fun prefetchLatest(ctx: Context, acc: Account, db: AppDatabase, count: Int = 3) {
+        val now = System.currentTimeMillis()
+        val last = prefetchAt[acc.email] ?: 0L
+        if (now - last < 60_000) return
+        prefetchAt[acc.email] = now
+        Thread {
+            runCatching {
+                kotlinx.coroutines.runBlocking {
+                    val targets = db.messages().inbox().filter { !it.loaded }.take(count)
+                    for (m in targets) {
+                        runCatching { loadFull(ctx, acc, m, db) }
+                    }
+                }
+            }
+        }.apply { isDaemon = true; name = "cloudmail-prefetch-${acc.email}" }.start()
+    }
+
     suspend fun loadFull(ctx: Context, acc: Account, msg: MailMessage, db: AppDatabase): MailMessage {
         if (msg.loaded) return msg
         return mutexFor(acc.email).withLock {
