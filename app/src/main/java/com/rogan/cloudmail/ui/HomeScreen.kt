@@ -149,8 +149,9 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     }
     LaunchedEffect(Unit) {
         refresh()
-        // 从标签管理页跳转过来：直接打开指定标签的邮件列表
-        FolderBridge.consume()?.let { folder = it; reloadKey++ }
+        // 从标签管理页跳转过来：直接打开指定标签的邮件列表；同时把侧边栏收起来，
+        // 之前侧边栏保持打开状态，用户以为“点标签只是打开了侧边栏”
+        FolderBridge.consume()?.let { folder = it; reloadKey++; scope.launch { drawer.close() } }
         val pid = pendingMessageId()
         if (pid > 0) {
             onConsumePending()
@@ -281,8 +282,8 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                     lastRefreshAt = System.currentTimeMillis()
                     refresh()
                 }
-                // 从标签管理页点了某个标签回来：切到该标签的邮件列表
-                FolderBridge.consume()?.let { folder = it; reloadKey++ }
+                // 从标签管理页点了某个标签回来：切到该标签的邮件列表，并收起侧边栏
+                FolderBridge.consume()?.let { folder = it; reloadKey++; scope.launch { drawer.close() } }
             }
         }
         life.lifecycle.addObserver(obs)
