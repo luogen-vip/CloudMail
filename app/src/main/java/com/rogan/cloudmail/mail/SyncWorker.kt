@@ -18,12 +18,18 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val ctx = applicationContext
         val db = AppDatabase.get(ctx)
         val accounts = db.accounts().all()
+        var gotNew = false
         for (acc in accounts) {
             runCatching {
                 val fresh = MailService.syncAccount(ctx, acc, db)
                 fresh.filter { !it.isRead && it.folder == "INBOX" }.forEach { notifyNew(ctx, acc.id, it) }
+                if (fresh.isNotEmpty()) gotNew = true
             }
         }
+        // 后台同步收到新邮件后递增推送版本号：主页 500ms 轮询检测到变化立即刷新列表+回顶，
+        // 保证“提示有一封新邮件”的同时，全部邮件顶部立刻出现这封信，
+        // 不需要用户点系统通知/切到未读文件夹才能看到
+        if (gotNew) MailService.pushVersion++
         return Result.success()
     }
 
