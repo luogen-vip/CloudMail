@@ -87,19 +87,21 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } },
                 actions = {
                     if (m != null) {
-                        // 置顶/取消置顶：改成文字按钮(之前的图钉图标被误认成“两个点，点了没反应”，
-                        // 实际是点击后列表里才看到效果，顶栏没有反馈)；文字按钮状态一目了然，点击有反馈
-                        TextButton(onClick = {
-                            scope.launch {
-                                val nv = if (m.pinnedAt > 0) 0L else System.currentTimeMillis()
-                                db.messages().setPinned(m.id, nv)
-                                msg = m.copy(pinnedAt = nv)
-                                m0 = m0?.copy(pinnedAt = nv)
-                                toast = if (nv > 0) "已置顶，会显示在列表最上面" else "已取消置顶"
+                        // 置顶/取消置顶：普通邮件用文字按钮；已发送邮件顶栏动作多，文字按钮会和返回箭头
+                        // 挤在一起(点返回误触置顶)，收进下方 ⋮ 菜单里，顶栏只留 星标/回复/⋮/删除
+                        if (m.folder != "SENT") {
+                            TextButton(onClick = {
+                                scope.launch {
+                                    val nv = if (m.pinnedAt > 0) 0L else System.currentTimeMillis()
+                                    db.messages().setPinned(m.id, nv)
+                                    msg = m.copy(pinnedAt = nv)
+                                    m0 = m0?.copy(pinnedAt = nv)
+                                    toast = if (nv > 0) "已置顶，会显示在列表最上面" else "已取消置顶"
+                                }
+                            }, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                                Text(if (m.pinnedAt > 0) "取消置顶" else "置顶", fontSize = 12.sp,
+                                    color = if (m.pinnedAt > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                             }
-                        }, contentPadding = PaddingValues(horizontal = 4.dp)) {
-                            Text(if (m.pinnedAt > 0) "取消置顶" else "置顶", fontSize = 12.sp,
-                                color = if (m.pinnedAt > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                         }
                         if (m.folder != "SENT") {
                             IconButton(onClick = { showShare = true }) { Icon(Icons.Default.Share, "分享/导出") }
@@ -132,6 +134,17 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             IconButton(onClick = { sentMenu = true }) { Icon(Icons.Default.MoreVert, "更多操作") }
                             androidx.compose.material3.DropdownMenu(expanded = sentMenu,
                                 onDismissRequest = { sentMenu = false }) {
+                                androidx.compose.material3.DropdownMenuItem(text = { Text(if (m.pinnedAt > 0) "取消置顶" else "置顶") },
+                                    onClick = {
+                                        sentMenu = false
+                                        scope.launch {
+                                            val nv = if (m.pinnedAt > 0) 0L else System.currentTimeMillis()
+                                            db.messages().setPinned(m.id, nv)
+                                            msg = m.copy(pinnedAt = nv)
+                                            m0 = m0?.copy(pinnedAt = nv)
+                                            toast = if (nv > 0) "已置顶，会显示在列表最上面" else "已取消置顶"
+                                        }
+                                    })
                                 androidx.compose.material3.DropdownMenuItem(text = { Text("✎ 再次编辑") },
                                     onClick = { sentMenu = false; nav.navigate("reedit/${m.id}") })
                                 androidx.compose.material3.DropdownMenuItem(text = { Text("↩ 撤回") },
