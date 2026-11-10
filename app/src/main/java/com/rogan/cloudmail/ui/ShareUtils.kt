@@ -156,14 +156,15 @@ object ShareUtils {
      *  - 其他文件 → MediaStore.Downloads(Download/CloudMail)，文件管理器里能找到。
      *  之前用 File API 直接写公共 Download 目录，Android 10+ 有限制，容易“提示保存成功但实际没写进去”；
      *  现在全部走 MediaStore，写入成功才提示成功，失败会给出真实原因 */
-    fun saveToDownloads(ctx: Context, f: File, mime: String): String = runCatching {
+    fun saveToDownloads(ctx: Context, f: File, mime: String, displayName: String? = null): String = runCatching {
+        val shown = displayName?.takeIf { it.isNotBlank() } ?: f.name
         if (!f.exists() || f.length() == 0L)
             return@runCatching "保存失败：文件不存在或为空(${f.name})，可能是正文还没加载完，请重新打开这封邮件再试"
         val mime2 = mime.ifBlank { guessMime(f.name) }
         val resolver = ctx.contentResolver
         if (android.os.Build.VERSION.SDK_INT >= 29) {
             val values = android.content.ContentValues().apply {
-                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, f.name)
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, shown)
                 put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime2)
                 put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
             }
@@ -185,15 +186,15 @@ object ShareUtils {
             values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
             when {
-                isImg -> "已保存到图库(相册里的 Pictures/CloudMail)：${f.name}"
-                isVid -> "已保存到视频库(Movies/CloudMail)：${f.name}"
-                else -> "已保存到手机「下载/CloudMail」文件夹(文件管理器里能找到)：${f.name}"
+                isImg -> "已保存到图库(相册里的 Pictures/CloudMail)：${shown}"
+                isVid -> "已保存到视频库(Movies/CloudMail)：${shown}"
+                else -> "已保存到手机「下载/CloudMail」文件夹(文件管理器里能找到)：${shown}"
             }
         } else {
             val dir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(
                 android.os.Environment.DIRECTORY_DOWNLOADS), "CloudMail")
             dir.mkdirs()
-            val out = java.io.File(dir, f.name)
+            val out = java.io.File(dir, shown)
             f.inputStream().use { ins -> out.outputStream().use { outs -> ins.copyTo(outs) } }
             android.media.MediaScannerConnection.scanFile(ctx, arrayOf(out.absolutePath), arrayOf(mime2), null)
             if (mime2.startsWith("image/")) "已保存到下载/CloudMail(图库稍后自动收录)：${out.absolutePath}"
@@ -201,7 +202,7 @@ object ShareUtils {
         }
     }.getOrElse {
         val dir = File(ctx.getExternalFilesDir(null), "Download").apply { mkdirs() }
-        val out = File(dir, f.name)
+        val out = File(dir, shown)
         runCatching { f.inputStream().use { ins -> out.outputStream().use { outs -> ins.copyTo(outs) } } }
         if (out.exists() && out.length() > 0) "已保存到应用文件夹(文件管理器→Android/data/com.rogan.cloudmail/files/Download)：${f.name}"
         else "保存失败：${it.message ?: "未知错误"}，请重试"
