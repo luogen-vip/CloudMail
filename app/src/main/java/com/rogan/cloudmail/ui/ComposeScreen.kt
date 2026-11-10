@@ -2,6 +2,7 @@ package com.rogan.cloudmail.ui
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.MediaRecorder
@@ -12,6 +13,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -68,7 +71,7 @@ sealed class BodyBlock {
 private var blockSeq = System.currentTimeMillis()
 private fun nextBlockId(): Long = ++blockSeq
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwardId: Long = -1, reeditId: Long = -1) {
     val ctx = LocalContext.current
@@ -118,6 +121,10 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     var showCardTpl by remember { mutableStateOf(false) }
     var editCard by remember { mutableStateOf<BodyBlock.Card?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
+    // 内置字体(子集化后的衬线/楷体，各约1.7MB)：编辑区即时用真实字体渲染，
+    // 不再依赖设备系统有没有对应中文字体(很多国产 ROM 没有 serif/cursive 中文，选了看不出变化)
+    val fontSerifFam = remember { assetFontFamily(ctx, "serif_sc.otf", androidx.compose.ui.text.font.FontFamily.Serif) }
+    val fontKaiFam = remember { assetFontFamily(ctx, "kai_sc.otf", androidx.compose.ui.text.font.FontFamily.Cursive) }
 
     LaunchedEffect(Unit) {
         accounts = db.accounts().all()
@@ -273,10 +280,12 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     fun blocksToHtml(): String = blocks.mapNotNull { b ->
         when (b) {
             is BodyBlock.T -> if (b.tv.text.isBlank()) null else {
-                // 彩色字体/字体样式：包一层 span 内联样式，对方邮箱原样显示同样颜色/字体
+                // 彩色字体/字体样式：包一层 span 内联样式，对方邮箱原样显示同样颜色/字体；
+                // font-family 写真实字体名+各平台回退(宋体/楷体)，不再只写泛型名导致对方端看不出变化
                 val style = buildString {
                     if (b.color.isNotBlank()) append("color:${b.color};")
-                    if (b.font.isNotBlank()) append("font-family:${b.font};")
+                    val ff = fontFamilyCss(b.font)
+                    if (ff.isNotBlank()) append("font-family:$ff;")
                 }
                 if (style.isBlank()) plainToHtml(b.tv.text)
                 else "<span style=\"$style\">${plainToHtml(b.tv.text)}</span>"
@@ -721,55 +730,59 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             disabledIndicatorColor = Color.Transparent),
                         textStyle = androidx.compose.material3.LocalTextStyle.current.copy(
                             color = if (tvColor == Color.Unspecified) MaterialTheme.colorScheme.onSurface else tvColor,
-                            fontFamily = tvFont))
+                            fontFamily = when (b.font) {
+                                "serif" -> fontSerifFam; "cursive" -> fontKaiFam; else -> tvFont }))
                     }
-                    is BodyBlock.Img -> Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                        AsyncImage(model = File(b.att.path), contentDescription = b.att.name,
-                            modifier = Modifier.fillMaxWidth().clickable { editImg = b },
-                            contentScale = ContentScale.FillWidth)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("正文图片 · 点击预览", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-                            TextButton(onClick = { editImg = b }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) { Text("删除", fontSize = 12.sp, color = Color(0xFFEF6C00)) }
-                        }
-                    }
-                    is BodyBlock.Lk -> Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Text("🔗 ${b.txt}", color = Color(0xFF1565C0), fontSize = 15.sp,
-                            textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f).clickable { editLink = b })
-                        IconButton(onClick = { editLink = b }, modifier = Modifier.size(28.dp)) {
-                            Icon(Icons.Default.Edit, "编辑链接", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        IconButton(onClick = { removeLinkBlock(b) }, modifier = Modifier.size(28.dp)) {
-                            Icon(Icons.Default.Close, "删除链接", Modifier.size(16.dp), tint = Color(0xFFEF6C00))
-                        }
-                    }
-                    is BodyBlock.Card -> Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                        // 卡片块：编辑时直接预览真实效果(收件人看到的就是这张卡片)；
-                        // 名片块里的头像图片(cid:)替换成本地文件路径，预览里头像也能显示
+                    // 编辑视图与发送效果一致：图片块就只显示图片本身，下方不再挂“删除/预览”文字行；
+                    // 点击图片=全屏预览(弹窗里可删除)，长按图片=直接从正文删除
+                    is BodyBlock.Img -> AsyncImage(model = File(b.att.path), contentDescription = b.att.name,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).combinedClickable(
+                            onClick = { editImg = b },
+                            onLongClick = { removeImgBlock(b); toast = "已从正文中删除这张图片" }),
+                        contentScale = ContentScale.FillWidth)
+                    // 编辑视图与发送效果一致：链接块就只显示蓝色下划线的链接文字(发送后就是这个样子)；
+                    // 点击=用内置浏览器打开链接，长按=弹出编辑/删除(编辑弹窗里可改文字地址或删除)
+                    is BodyBlock.Lk -> Text(b.txt, color = Color(0xFF1565C0), fontSize = 15.sp,
+                        textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).combinedClickable(
+                            onClick = {
+                                runCatching { nav.navigate("browser/" + android.net.Uri.encode(b.url)) }.onFailure {
+                                    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(b.url))) }
+                                }
+                            },
+                            onLongClick = { editLink = b }))
+                    // 编辑视图与发送效果一致：卡片块就只显示卡片本身，下方不再挂“重新编辑/删除”文字行；
+                    // 点击卡片=弹出操作菜单(重新编辑/删除)，长按卡片=直接重新编辑
+                    is BodyBlock.Card -> {
+                        var cardMenu by remember(b.id) { mutableStateOf(false) }
                         val previewHtml = buildString {
                             var h = b.html
                             atts.filter { it.cid.isNotBlank() && it.path.isNotBlank() && File(it.path).exists() }
                                 .forEach { a -> h = h.replace("cid:${a.cid}", "file://${a.path}") }
-                            append("<html><head><meta name='viewport' content='width=device-width,initial-scale=1'/></head>")
+                            append("<html><head><meta name='viewport' content='width=device-width,initial-scale=1'/>${fontFaceCss()}</head>")
                             append("<body style='margin:0;font-family:sans-serif'>")
                             append(h)
                             append("</body></html>")
                         }
-                        AndroidView(factory = { vctx ->
-                            android.webkit.WebView(vctx).apply {
-                                settings.javaScriptEnabled = false
-                                settings.allowFileAccess = true
-                                setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                            }
-                        }, update = { wv ->
-                            wv.loadDataWithBaseURL(null, previewHtml, "text/html", "utf-8", null)
-                        }, modifier = Modifier.fillMaxWidth().height(210.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("卡片(收件人看到的样式)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-                            TextButton(onClick = { editCard = b }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) { Text("重新编辑", fontSize = 12.sp) }
-                            TextButton(onClick = { blocks.remove(b); normalizeBlocks(); toast = "卡片已删除" },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) { Text("删除", fontSize = 12.sp, color = Color(0xFFEF6C00)) }
+                        Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                            AndroidView(factory = { vctx ->
+                                android.webkit.WebView(vctx).apply {
+                                    settings.javaScriptEnabled = false
+                                    settings.allowFileAccess = true
+                                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                }
+                            }, update = { wv ->
+                                wv.loadDataWithBaseURL("file:///android_asset/", previewHtml, "text/html", "utf-8", null)
+                            }, modifier = Modifier.fillMaxWidth().height(210.dp))
+                            Box(Modifier.matchParentSize().combinedClickable(
+                                onClick = { cardMenu = true },
+                                onLongClick = { editCard = b }))
+                        }
+                        androidx.compose.material3.DropdownMenu(expanded = cardMenu, onDismissRequest = { cardMenu = false }) {
+                            androidx.compose.material3.DropdownMenuItem(text = { Text("✎ 重新编辑") },
+                                onClick = { cardMenu = false; editCard = b })
+                            androidx.compose.material3.DropdownMenuItem(text = { Text("🗑 删除卡片") },
+                                onClick = { cardMenu = false; blocks.remove(b); normalizeBlocks(); toast = "卡片已删除" })
                         }
                     }
                 }
@@ -972,47 +985,44 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             AlertDialog(onDismissRequest = { showCardTpl = false; editCard = null },
                 title = { Text(if (editing == null) "插入卡片" else "重新编辑卡片") },
                 text = {
-                    Column(Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        // 8 种样式，两行四个，选中高亮；点一下立刻在下方预览里看到真实效果
-                        listOf(0, 1, 2, 3).forEach { rowStart ->
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState())) {
-                                (rowStart until rowStart + 4).forEach { i ->
-                                    FilterChip(selected = tpl == i, onClick = { tpl = i },
-                                        label = { Text(cardName(i), fontSize = 12.sp) })
-                                }
-                            }
-                        }
+                    // 样式选择和实时预览同屏：上面选样式/填内容(内容多时可滚动)，预览固定在下方，不用来回滑动找
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        // 8 种样式一行横滑，选中高亮；点一下立刻在下方预览里看到真实效果
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp),
                             modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState())) {
-                            FilterChip(selected = tpl == 6, onClick = { tpl = 6 }, label = { Text(cardName(6), fontSize = 12.sp) })
-                            FilterChip(selected = tpl == 7, onClick = { tpl = 7 }, label = { Text(cardName(7), fontSize = 12.sp) })
+                            (0..7).forEach { i ->
+                                FilterChip(selected = tpl == i, onClick = { tpl = i },
+                                    label = { Text(cardName(i), fontSize = 12.sp) })
+                            }
                         }
-                        TextField(value = ct, onValueChange = { ct = it }, placeholder = { Text("卡片标题") },
-                            singleLine = true, textStyle = MaterialTheme.typography.bodySmall)
-                        TextField(value = cb, onValueChange = { cb = it },
-                            placeholder = { Text("卡片正文(想放多少字就放多少字，没有上限)") },
-                            minLines = 4, textStyle = MaterialTheme.typography.bodySmall)
-                        TextField(value = clt, onValueChange = { clt = it }, placeholder = { Text("链接文字(留空则卡片不带链接)") },
-                            singleLine = true, textStyle = MaterialTheme.typography.bodySmall)
-                        if (clt.text.isNotBlank())
-                            TextField(value = clu, onValueChange = { clu = it }, placeholder = { Text("链接地址 https://…") },
+                        Column(Modifier.weight(1f, fill = false).verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            TextField(value = ct, onValueChange = { ct = it }, placeholder = { Text("卡片标题") },
                                 singleLine = true, textStyle = MaterialTheme.typography.bodySmall)
+                            TextField(value = cb, onValueChange = { cb = it },
+                                placeholder = { Text("卡片正文") },
+                                minLines = 4, textStyle = MaterialTheme.typography.bodySmall)
+                            TextField(value = clt, onValueChange = { clt = it }, placeholder = { Text("链接文字(留空则卡片不带链接)") },
+                                singleLine = true, textStyle = MaterialTheme.typography.bodySmall)
+                            if (clt.text.isNotBlank())
+                                TextField(value = clu, onValueChange = { clu = it }, placeholder = { Text("链接地址 https://…") },
+                                    singleLine = true, textStyle = MaterialTheme.typography.bodySmall)
+                        }
                         // 实时预览：和真实发送的 HTML 完全同一段，所见即对方所得
                         Text("实时预览(对方收到的样子)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         AndroidView(factory = { vctx ->
                             android.webkit.WebView(vctx).apply {
                                 settings.javaScriptEnabled = false
+                                settings.allowFileAccess = true
                                 setBackgroundColor(android.graphics.Color.TRANSPARENT)
                             }
                         }, update = { wv ->
-                            wv.loadDataWithBaseURL(null,
-                                "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'/></head>" +
+                            wv.loadDataWithBaseURL("file:///android_asset/",
+                                "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'/>${fontFaceCss()}</head>" +
                                 "<body style='margin:0;font-family:sans-serif'>" +
                                 buildCardHtml(tpl, escXml(ct.text.trim()), escXml(cb.text.trim()).replace("\n", "<br/>"), linkHtmlNow()) +
                                 "</body></html>", "text/html", "utf-8", null)
-                        }, modifier = Modifier.fillMaxWidth().height(190.dp))
+                        }, modifier = Modifier.fillMaxWidth().height(160.dp))
                     }
                 },
                 confirmButton = {
@@ -1121,6 +1131,37 @@ fun fontLabel(f: String) = when (f) {
     else -> "默认"
 }
 
+/** 字体选项 → 发送 HTML 里的 CSS font-family(真实字体名+各平台回退：收件方电脑/手机上
+ *  宋体/楷体都能正确落到对应风格，不再因为只写泛型名看不出变化) */
+fun fontFamilyCss(f: String) = when (f) {
+    "serif" -> "'Noto Serif SC','Songti SC','SimSun',serif"
+    "cursive" -> "'LXGW WenKai','KaiTi','STKaiti','Kaiti SC',cursive"
+    "monospace" -> "'Sarasa Mono SC','Menlo','Consolas',monospace"
+    "sans-serif" -> "'MiSans','HarmonyOS Sans SC','PingFang SC','Microsoft YaHei',sans-serif"
+    else -> ""
+}
+
+/** 给 WebView 正文包一层 @font-face：收到的邮件/卡片预览/长图都用 APP 内置的衬线/楷体
+ *  字体渲染，和发送时编辑区看到的完全一致(不依赖手机系统有没有这些字体)。
+ *  字体文件在 assets/fonts/ 下，配合 loadDataWithBaseURL("file:///android_asset/",…) 相对路径加载 */
+fun fontFaceCss(): String = "<style>" +
+    "@font-face{font-family:'Noto Serif SC';src:url('fonts/serif_sc.otf')}" +
+    "@font-face{font-family:'LXGW WenKai';src:url('fonts/kai_sc.otf')}" +
+    "</style>"
+
+/** 从 assets 加载内置字体文件(首次使用时复制到私有目录，Compose 的 Font 可以从文件读)。
+ *  加载失败时回退到系统对应字体族，保证不崩 */
+fun assetFontFamily(ctx: Context, assetName: String, fallback: androidx.compose.ui.text.font.FontFamily): androidx.compose.ui.text.font.FontFamily {
+    return runCatching {
+        val dir = File(ctx.filesDir, "fonts").apply { mkdirs() }
+        val f = File(dir, assetName)
+        if (!f.exists() || f.length() == 0L)
+            ctx.assets.open("fonts/$assetName").use { ins -> f.outputStream().use { ins.copyTo(it) } }
+        androidx.compose.ui.text.font.Font(android.graphics.Typeface.createFromFile(f))
+            .let { androidx.compose.ui.text.font.FontFamily(it) }
+    }.getOrDefault(fallback)
+}
+
 /** 常驻样式工具行(正文上方)：图片/文件/卡片 + 字色色板 + 字体。
  *  字色直观化：色球下方显示当前颜色名字，选中的色球带描边圈，一眼看出选了哪个色 */
 private val PALETTE = listOf(
@@ -1180,7 +1221,7 @@ fun ComposeStyleToolbar(blocks: MutableList<BodyBlock>, cursorBlockId: Long?,
                 }
                 DropdownMenu(expanded = fontMenu, onDismissRequest = { fontMenu = false }) {
                     listOf("" to "默认字体", "sans-serif" to "无衬线", "serif" to "衬线(宋体风)",
-                        "monospace" to "等宽(代码风)", "cursive" to "手写风").forEach { (v, name) ->
+                        "monospace" to "等宽(代码风)", "cursive" to "手写(楷体)").forEach { (v, name) ->
                         DropdownMenuItem(text = { Text(name, fontSize = 13.sp,
                             fontWeight = if ((curT?.font ?: "") == v) FontWeight.Bold else FontWeight.Normal) },
                             onClick = {
@@ -1244,7 +1285,7 @@ fun cardField(html: String?, key: String): String {
 }
 
 @Composable
-private fun Stepper(label: String, value: Int, min: Int, max: Int, onChange: (Int) -> Unit) {
+internal fun Stepper(label: String, value: Int, min: Int, max: Int, onChange: (Int) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(label, fontSize = 14.sp, modifier = Modifier.width(52.dp))
         IconButton(onClick = { if (value > min) onChange(value - 1) }, modifier = Modifier.size(30.dp)) { Icon(Icons.Default.Remove, null, Modifier.size(18.dp)) }
@@ -1361,7 +1402,7 @@ fun htmlToBlocks(html: String, atts: List<AttInfo>): MutableList<BodyBlock> {
                 g[5].replace("&amp;", "&")))
             g[7].isNotEmpty() -> addText(g[8],
                 Regex("color:([^;\"]+)").find(g[7])?.groupValues?.get(1)?.trim() ?: "",
-                Regex("font-family:([^;\"]+)").find(g[7])?.groupValues?.get(1)?.trim() ?: "")
+                cssToFontKey(Regex("font-family:([^;\"]+)").find(g[7])?.groupValues?.get(1)?.trim() ?: ""))
         }
         last = mr.range.last + 1
     }
@@ -1374,6 +1415,20 @@ fun htmlToPlain(html: String): String = html
     .replace(Regex("<img[^>]*>"), "")
     .replace("<br/>", "\n").replace(Regex("<[^>]+>"), "")
     .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ")
+
+/** HTML 里的 CSS font-family(真实字体名或泛型名) → 编辑器字体选项 key(serif/cursive/monospace/sans-serif)。
+ *  再次编辑已发送邮件时用：发送出去的是 'Noto Serif SC','Songti SC',serif 这类真实字体名，要归一化回来 */
+fun cssToFontKey(raw: String): String {
+    val r = raw.trim().lowercase()
+    if (r.isBlank()) return ""
+    return when {
+        "sans-serif" in r || "misans" in r || "harmonyos" in r || "pingfang" in r || "yahei" in r -> "sans-serif"
+        "mono" in r || "menlo" in r || "consolas" in r -> "monospace"
+        "wenkai" in r || "kaiti" in r || "cursive" in r -> "cursive"
+        "serif" in r || "simsun" in r || "songti" in r -> "serif"
+        else -> ""
+    }
+}
 
 fun guessMime(name: String): String {
     val ext = name.substringAfterLast('.', "").lowercase()
