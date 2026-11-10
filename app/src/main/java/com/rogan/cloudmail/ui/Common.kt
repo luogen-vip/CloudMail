@@ -21,13 +21,11 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
-fun fmtTime(millis: Long, now: Long = System.currentTimeMillis()): String {
+fun fmtTime(millis: Long): String {
+    val now = System.currentTimeMillis()
     val diff = now - millis
     return when {
-        // 刚收到的邮件直接显示“刚刚/N分钟前”，用户一眼看出是最新邮件；过一会儿自动变成具体时间
-        diff < 60_000L -> "刚刚"
-        diff < 60_000L * 60 -> "${diff / 60_000L}分钟前"
-        isSameDay(now, millis) ->
+        diff < 60_000L * 60 * 24 && isSameDay(now, millis) ->
             SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(millis))
         isSameDay(now - 86_400_000L, millis) -> "昨天"
         else -> SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(Date(millis))
