@@ -80,6 +80,47 @@ data class OutboxItem(
     val error: String = ""          // 发送失败原因
 )
 
+/* ============ 标签 ============ */
+
+@Entity(tableName = "labels")
+data class Label(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val createdAt: Long
+)
+
+// 邮件↔标签 多对多关联
+@Entity(tableName = "mail_labels", primaryKeys = ["labelId", "messageId"])
+data class MailLabel(
+    val labelId: Long,
+    val messageId: Long
+)
+
+@Dao
+interface LabelDao {
+    @Query("SELECT * FROM labels ORDER BY createdAt ASC") suspend fun all(): List<Label>
+    @Query("SELECT * FROM labels WHERE id = :id") suspend fun byId(id: Long): Label?
+    @Insert suspend fun insert(l: Label): Long
+    @Query("UPDATE labels SET name = :name WHERE id = :id") suspend fun rename(id: Long, name: String)
+    @Query("DELETE FROM labels WHERE id = :id") suspend fun delete(id: Long)
+}
+
+@Dao
+interface MailLabelDao {
+    @Query("SELECT m.* FROM messages m INNER JOIN mail_labels ml ON m.id = ml.messageId " +
+            "WHERE ml.labelId = :labelId AND m.folder IN ('INBOX','SENT') ORDER BY m.date DESC")
+    suspend fun messagesForLabel(labelId: Long): List<MailMessage>
+    @Query("SELECT labelId FROM mail_labels WHERE messageId = :messageId")
+    suspend fun labelIdsOf(messageId: Long): List<Long>
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insert(ml: MailLabel)
+    @Query("DELETE FROM mail_labels WHERE labelId = :labelId AND messageId = :messageId")
+    suspend fun remove(labelId: Long, messageId: Long)
+    // 删除标签时自动解除其下所有邮件的关联
+    @Query("DELETE FROM mail_labels WHERE labelId = :labelId") suspend fun deleteByLabel(labelId: Long)
+    @Query("DELETE FROM mail_labels WHERE messageId = :messageId") suspend fun deleteByMessage(messageId: Long)
+    @Query("SELECT COUNT(*) FROM mail_labels WHERE labelId = :labelId") suspend fun countForLabel(labelId: Long): Int
+}
+
 /* ============ DAO ============ */
 
 @Dao
