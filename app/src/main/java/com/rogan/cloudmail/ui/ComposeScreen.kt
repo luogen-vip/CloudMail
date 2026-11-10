@@ -51,8 +51,11 @@ import androidx.navigation.NavHostController
 import com.rogan.cloudmail.data.*
 import com.rogan.cloudmail.mail.SendWorker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
 import java.io.File
 import java.util.*
 
@@ -587,15 +590,22 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         }
     }
 
-    // 提示条用 Scaffold 标准的 SnackbarHost：之前直接把 Snackbar 放在内容层顶部，
-    // 被顶栏(标题栏)遮住根本看不见——“未填收件人点发送没提示”就是这个原因
-    val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
-    LaunchedEffect(toast) {
-        toast?.let { snackbar.showSnackbar(it); toast = null }
-    }
-
+    // 提示条放在 Scaffold 的 snackbarHost 槽位(不会被顶栏遮住，之前“未填收件人点发送没提示”就是这个原因)。
+    // 时长缩短：Snackbar 默认一挂就是 4 秒左右，插入图片/卡片后挡着正文没法马上接着打字；
+    // 改成自绘小黑条 1.5 秒自动消失，想继续写正文直接点正文区域即可
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbar) },
+        snackbarHost = {
+            LaunchedEffect(toast) {
+                if (toast != null) { delay(1500); toast = null }
+            }
+            toast?.let { t ->
+                Surface(shape = RoundedCornerShape(20.dp), color = Color(0xE6323232),
+                    shadowElevation = 4.dp, modifier = Modifier.padding(bottom = 72.dp)) {
+                    Text(t, color = Color.White, fontSize = 13.sp,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp))
+                }
+            }
+        },
         topBar = {
             TopAppBar(
                 title = { Text("写邮件", fontSize = 18.sp) },
@@ -794,17 +804,24 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     is BodyBlock.Img -> Box(
                         Modifier.fillMaxWidth().padding(vertical = 6.dp),
                         contentAlignment = Alignment.Center) {
+                        // 图片块加圆角+淡描边(只在编辑区显示)：一眼看出“这是一张图片块”不是文字，
+                        // 点它=编辑图片，点旁边空白=继续打字
                         AsyncImage(model = File(b.att.path), contentDescription = b.att.name,
-                            modifier = Modifier.combinedClickable(
+                            modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                                .border(1.dp, Color(0x33808080), RoundedCornerShape(10.dp))
+                                .combinedClickable(
                                 onClick = { editImg = b },
                                 onLongClick = { removeImgBlock(b); toast = "已从正文中删除这张图片" }),
                             contentScale = ContentScale.FillWidth)
                     }
                     // 编辑视图与发送效果一致：链接块就只显示蓝色下划线的链接文字(发送后就是这个样子)；
                     // 点击=用内置浏览器打开链接，长按=弹出编辑/删除(编辑弹窗里可改文字地址或删除)
+                    // 链接块加淡蓝底+圆角(只在编辑区显示)：一眼看出“这是一个链接块”不是正文文字
                     is BodyBlock.Lk -> Text(b.txt, color = Color(0xFF1565C0), fontSize = 15.sp,
                         textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).combinedClickable(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+                            .background(Color(0x141565C0), RoundedCornerShape(8.dp))
+                            .combinedClickable(
                             onClick = {
                                 runCatching { nav.navigate("browser/" + android.net.Uri.encode(b.url)) }.onFailure {
                                     runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(b.url))) }
@@ -813,12 +830,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             onLongClick = { editLink = b }))
                     // 编辑视图与发送效果一致：卡片块就只显示卡片本身，下方不再挂“重新编辑/删除”文字行；
                     // 点击卡片=弹出操作菜单(重新编辑/删除)，长按卡片=直接重新编辑。
-                    // 点击热区精确到卡片本身：WebView 高度跟随卡片真实内容高度(onPageFinished 后量内容高)，
-                    // 卡片下面不再有一大块“看似空白、点了却弹菜单”的区域
+                    // 点击热区精确到卡片本身：WebView 用 wrap-content 自身量内容高(之前手动量一次、
+                    // 量偏大/失败时卡片下方多出一截“空白却点得出菜单”的区域)，内容到哪热区就到哪，
+                    // 卡片下面第一行就能直接打字
                     is BodyBlock.Card -> {
                         var cardMenu by remember(b.id) { mutableStateOf(false) }
-                        val dens = LocalDensity.current
-                        var cardH by remember(b.id) { mutableStateOf(210) }
                         val previewHtml = buildString {
                             var h = b.html
                             atts.filter { it.cid.isNotBlank() && it.path.isNotBlank() && File(it.path).exists() }
@@ -837,16 +853,9 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                                     // 不抢触摸/焦点：首次点卡片的响应更快，也不会被 WebView 吞掉第一次点击
                                     isFocusable = false; isClickable = false; isLongClickable = false
                                     isHapticFeedbackEnabled = false
-                                    // 卡片高度自适应内容：量出真实内容高，点击热区只剩卡片本身
-                                    webViewClient = object : android.webkit.WebViewClient() {
-                                        override fun onPageFinished(v: android.webkit.WebView, u: String?) {
-                                            v.postDelayed({
-                                                val h = (v.contentHeight * v.scale).toInt()
-                                                if (h > 40) cardH = (h / dens.density).toInt().coerceIn(70, 420)
-                                            }, 500)
-                                        }
-                                        // 卡片里的链接一律走 APP 内置浏览器(可复制链接/再用系统浏览器打开)，
+                                    // 卡片里的链接一律走 APP 内置浏览器(可复制链接/再用系统浏览器打开)，
                                         // 不再一点就跳出 APP
+                                    webViewClient = object : android.webkit.WebViewClient() {
                                         override fun shouldOverrideUrlLoading(view: android.webkit.WebView, u: String): Boolean {
                                             return if (u.startsWith("http://") || u.startsWith("https://")) {
                                                 runCatching { nav.navigate("browser/" + android.net.Uri.encode(u)) }
@@ -861,7 +870,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                                     wv.tag = previewHtml
                                     wv.loadDataWithBaseURL("file:///android_asset/", previewHtml, "text/html", "utf-8", null)
                                 }
-                            }, modifier = Modifier.fillMaxWidth().height(cardH.dp))
+                            }, modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp))
                             Box(Modifier.matchParentSize().combinedClickable(
                                 onClick = { cardMenu = true },
                                 onLongClick = { editCard = b }))
@@ -1235,8 +1244,9 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
 fun escXml(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 fun fontLabel(f: String) = when (f) {
-    "sans-serif" -> "无衬线"; "serif" -> "衬线"; "monospace" -> "等宽"; "cursive" -> "手写"
-    else -> "默认"
+    "sans-serif" -> "字体·无衬线"; "serif" -> "字体·衬线(宋体风)"; "monospace" -> "字体·等宽"
+    "cursive" -> "字体·手写(楷体)"
+    else -> "字体·默认"
 }
 
 /** 字体选项 → 发送 HTML 里的 CSS font-family(真实字体名+各平台回退：收件方电脑/手机上
@@ -1298,8 +1308,9 @@ fun ComposeStyleToolbar(blocks: MutableList<BodyBlock>, cursorBlockId: Long?,
             Box {
                 TextButton(onClick = { fontMenu = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     enabled = curT != null) {
-                    Text("字体：${fontLabel(curT?.font ?: "")}", fontSize = 12.sp, maxLines = 1,
-                        modifier = Modifier.widthIn(min = 70.dp))
+                    // 直接显示当前选中的字体名(冒号去掉、名称完整)，不用猜冒号后面藏了什么
+                    Text(fontLabel(curT?.font ?: ""), fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                        maxLines = 1)
                 }
                 DropdownMenu(expanded = fontMenu, onDismissRequest = { fontMenu = false }) {
                     listOf("" to "默认字体", "sans-serif" to "无衬线", "serif" to "衬线(宋体风)",
@@ -1343,8 +1354,10 @@ fun ComposeStyleToolbar(blocks: MutableList<BodyBlock>, cursorBlockId: Long?,
                     })
             }
             Spacer(Modifier.width(6.dp))
-            Text("字色：${PALETTE.firstOrNull { it.first == (curT?.color ?: "") }?.second ?: "自定义"}",
-                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+            // 直接显示当前选中的颜色名(完整、不带冒号)，一眼知道现在用的是什么颜色
+            Text(PALETTE.firstOrNull { it.first == (curT?.color ?: "") }?.second ?: "自定义",
+                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Medium, maxLines = 1)
         }
     }
 }
