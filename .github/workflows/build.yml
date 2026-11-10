@@ -16,6 +16,13 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 固定 Git 提交身份（罗根）
+        run: |
+          git config --global user.name "罗根"
+          git config --global user.email "2437431045@qq.com"
+          git config --global init.defaultBranch main
+          echo "提交身份=$(git config --global user.name) <$(git config --global user.email)>"
+
       - name: 配置 JDK 17
         uses: actions/setup-java@v4
         with:

@@ -1,0 +1,9 @@
+# .mailmap —— 贡献者显示名归一化
+# 作用：即使某次提交用了旧身份/旧邮箱，GitHub 与 git shortlog 也会统一显示为「罗根」，
+# 不会再把历史贡献者拆成 luogen / luogen-vip 等多个条目。
+# 格式：正确姓名 <正确邮箱>  提交中的姓名 <提交中的邮箱>
+
+罗根 <2437431045@qq.com>
+罗根 <2437431045@qq.com> luogen <luogen@local>
+罗根 <2437431045@qq.com> luogen-vip <luogen@users.noreply.github.com>
+罗根 <2437431045@qq.com> 罗根 <luogen-vip@users.noreply.github.com>
