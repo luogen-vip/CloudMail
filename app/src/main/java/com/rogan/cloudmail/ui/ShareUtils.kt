@@ -201,10 +201,11 @@ object ShareUtils {
             else "已保存到下载/CloudMail：${out.absolutePath}"
         }
     }.getOrElse {
+        val shown = displayName?.takeIf { it.isNotBlank() } ?: f.name
         val dir = File(ctx.getExternalFilesDir(null), "Download").apply { mkdirs() }
         val out = File(dir, shown)
         runCatching { f.inputStream().use { ins -> out.outputStream().use { outs -> ins.copyTo(outs) } } }
-        if (out.exists() && out.length() > 0) "已保存到应用文件夹(文件管理器→Android/data/com.rogan.cloudmail/files/Download)：${f.name}"
+        if (out.exists() && out.length() > 0) "已保存到应用文件夹(文件管理器→Android/data/com.rogan.cloudmail/files/Download)：${shown}"
         else "保存失败：${it.message ?: "未知错误"}，请重试"
     }
 
