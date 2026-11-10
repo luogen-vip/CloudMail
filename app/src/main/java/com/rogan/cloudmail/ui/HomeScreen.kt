@@ -814,9 +814,7 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                     Text(m.snippet, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        // 置顶图钉：一眼看出哪些邮件被置顶了
-                                        if (m.pinnedAt > 0) Icon(Icons.Default.PushPin, "已置顶", Modifier.size(13.dp),
-                                            tint = MaterialTheme.colorScheme.primary)
+                                        // 置顶邮件已通过排在列表最上面体现，不再加图钉小图标(之前被看成小圆点)
                                         if (m.isAd) Text("广告", fontSize = 10.sp, color = Color.White,
                                             modifier = Modifier.background(Color(0xFFEF6C00), MaterialTheme.shapes.small).padding(horizontal = 4.dp, vertical = 1.dp))
                                         // 退信邮件红色徽标：一眼看出这封信是系统退信(发送未真正送达)，不是普通新邮件
