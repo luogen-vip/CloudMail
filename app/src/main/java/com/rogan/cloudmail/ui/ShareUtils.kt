@@ -168,20 +168,11 @@ object ShareUtils {
                 put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime2)
                 put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val isImg = mime2.startsWith("image/")
-            val isVid = mime2.startsWith("video/")
-            val uri: android.net.Uri = (if (isImg) {
-                values.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CloudMail")
-                resolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-            } else if (isVid) {
-                values.put(android.provider.MediaStore.Video.Media.RELATIVE_PATH, "Movies/CloudMail")
-                resolver.insert(android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-            } else {
-                values.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/CloudMail")
-                resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            }) ?: throw IllegalStateException("无法创建保存条目")
-            val os = resolver.openOutputStream(uri) ?: throw IllegalStateException("无法写入文件")
-            os.use { outs -> f.inputStream().use { ins -> ins.copyTo(outs) } }
+            val resolver = ctx.contentResolver
+            val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("无法创建下载条目")
+            val os = resolver.openOutputStream(uri) ?: throw IllegalStateException("无法写入下载文件")
+            os.use { out -> f.inputStream().use { it.copyTo(out) } }
             values.clear()
             values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
@@ -218,11 +209,13 @@ object ShareUtils {
             .coerceAtMost(1080)
     }
 
-    /** 正文渲染成长图(清晰完整)：WebView 按内容高度渲染成一张 PNG(含主题/发件人头部)。
-     *  必须把 WebView 临时挂到当前窗口(移到屏幕外，用户看不见)才能真实渲染：
-     *  之前不挂窗口直接 draw，很多机型画出来是空白；
-     *  高度测量改为轮询到稳定：之前只在 onPageFinished 量一次，正文里的图片/字体还在异步加载，
-     *  高度定格太小，长图只有上半部分；现在每 400ms 量一次内容高度，连续 3 次稳定才截图 */
+    /** 正文渲染成长图(清晰完整)：把整封邮件(含主题/发件人头部)渲染成一张 PNG。
+     *
+     *  之前的问题：按内容高度把 WebView 一次性撑到 totalH 再 draw，硬件渲染有纹理尺寸上限，
+     *  超出屏幕视口的部分根本没画出来 —— 表现就是“长图很长，但下面一大截是空白”。
+     *  现在改成「滚动分块拼接」：WebView 保持屏幕视口高度，逐屏滚动到底，把每一屏画到长图对应位置，
+     *  这样内容是真实滚过去的，不会再有空白；内容再长也完整。
+     *  另外整图像素总量做了上限保护(过大时等比缩小)，避免超大图 OOM。 */
     suspend fun exportLongImage(ctx: Context, m: MailMessage): File? = withContext(Dispatchers.Main) {
         val inlineAtts = AttInfo.fromJson(m.attachmentsJson).filter { it.isInline && it.cid.isNotBlank() }
         var html = m.bodyHtml.ifBlank { "<p style='color:#999'>(无正文内容)</p>" }
@@ -239,7 +232,7 @@ object ShareUtils {
             发件人：${escXml(m.fromName.ifBlank { m.fromAddr })} ｜ ${fmtFull(m.date)}</div>$html</body></html>
         """.trimIndent()
         val out = File(exportDir(ctx), safeName(m) + ".png")
-        // 找到当前 Activity 的根布局，把 WebView 挂上去(移到屏幕外)
+        // 找到当前 Activity 的根布局，把 WebView 挂上去(移到屏幕外)才能真实渲染、真实滚动
         var c: Context = ctx
         var act: android.app.Activity? = null
         while (c is android.content.ContextWrapper) {
@@ -248,121 +241,88 @@ object ShareUtils {
         }
         val root = act?.window?.decorView as? android.view.ViewGroup
         val widthPx = widthPxOf(ctx)
-        if (root != null) {
-            renderAttached(root, full, widthPx, out)
-        } else {
-            renderOffscreen(ctx, full, widthPx, out)
-        }
+        captureLongImage(ctx, root, full, widthPx, out)
         out.takeIf { it.exists() && it.length() > 0 }
     }
 
-    /** 挂到窗口渲染(可靠方案)：内容高度轮询到连续稳定后才截图，保证长邮件完整 */
-    private suspend fun renderAttached(root: android.view.ViewGroup, full: String, widthPx: Int, out: File) {
-        kotlinx.coroutines.withTimeoutOrNull(25000) {
-            suspendCancellableCoroutine { cont ->
-                val wv = WebView(root.context)
-                wv.settings.javaScriptEnabled = false
-                wv.settings.allowFileAccess = true
-                val lp = android.widget.FrameLayout.LayoutParams(widthPx,
-                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT)
-                wv.translationY = -100000f // 移到屏幕外，用户看不到
-                root.addView(wv, lp)
-                wv.webViewClient = object : android.webkit.WebViewClient() {
-                    override fun onPageFinished(view: WebView, u: String) {
-                        var lastH = -1
-                        var stable = 0
-                        var tries = 0
-                        fun tick() {
-                            tries++
-                            val h = (view.contentHeight * view.scale).toInt().coerceIn(200, 12000)
-                            if (h == lastH) stable++ else { stable = 0; lastH = h }
-                            if (stable >= 3 || tries > 55) {
-                                view.post {
-                                    val h2 = lastH.coerceAtLeast(200)
-                                    try {
-                                        // 关键修复“长图下半空白”：WebView 只渲染可视区域，
-                                        // 直接 draw 时屏外的下半部分是空白。改用软件图层(SOFTWARE)
-                                        // 强制 WebView 把整页光栅化后再 draw，保证从头到尾全部有内容
-                                        view.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
-                                        // 位图内存保护：面积超过 4000 万像素时压缩宽度
-                                        val w = if (widthPx.toLong() * h2 > 40_000_000L) (40_000_000L / h2).toInt() else widthPx
-                                        view.measure(
-                                            android.view.View.MeasureSpec.makeMeasureSpec(w, android.view.View.MeasureSpec.EXACTLY),
-                                            android.view.View.MeasureSpec.makeMeasureSpec(h2, android.view.View.MeasureSpec.EXACTLY))
-                                        view.layout(0, 0, w, h2)
-                                        // 先滚到底再回顶：触发懒加载内容(远程图片/字体)全部加载，并强制整页重绘
-                                        view.scrollTo(0, h2); view.scrollTo(0, 0)
-                                        view.postDelayed({
-                                            try {
-                                                val bmp = Bitmap.createBitmap(w, h2, Bitmap.Config.ARGB_8888)
-                                                val cvs = android.graphics.Canvas(bmp)
-                                                cvs.drawColor(android.graphics.Color.WHITE)
-                                                view.draw(cvs)
-                                                out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                                                bmp.recycle()
-                                            } catch (_: Throwable) { }
-                                            root.removeView(wv)
-                                            wv.destroy()
-                                            if (cont.isActive) cont.resume(Unit)
-                                        }, 400)
-                                    } catch (_: Throwable) {
-                                        root.removeView(wv)
-                                        wv.destroy()
-                                        if (cont.isActive) cont.resume(Unit)
-                                    }
-                                }
-                            } else view.postDelayed({ tick() }, 400)
-                        }
-                        view.postDelayed({ tick() }, 400)
-                    }
-                }
-                wv.loadDataWithBaseURL("file:///android_asset/", full, "text/html", "utf-8", null)
-            }
+    /** 滚动分块截图：把 WebView 逐屏截下来拼成一张完整长图 */
+    private suspend fun captureLongImage(ctx: Context, root: android.view.ViewGroup?, full: String,
+                                         widthPx: Int, out: File) {
+        val wv = WebView(ctx)
+        wv.settings.javaScriptEnabled = false
+        wv.settings.allowFileAccess = true
+        wv.setBackgroundColor(android.graphics.Color.WHITE)
+        wv.isVerticalScrollBarEnabled = false
+        wv.isHorizontalScrollBarEnabled = false
+        wv.overScrollMode = android.view.View.OVER_SCROLL_NEVER
+        val vpH = ctx.resources.displayMetrics.heightPixels.coerceAtLeast(600)
+        var attached = false
+        if (root != null) {
+            val lp = android.widget.FrameLayout.LayoutParams(widthPx, vpH)
+            wv.translationY = -100000f // 移到屏幕外，用户看不见
+            root.addView(wv, lp)
+            attached = true
+        } else {
+            wv.layout(0, 0, widthPx, vpH)
         }
-    }
-
-    /** 拿不到窗口时的兜底渲染(老方式，部分机型仍可用) */
-    private suspend fun renderOffscreen(ctx: Context, full: String, widthPx: Int, out: File) {
-        kotlinx.coroutines.withTimeoutOrNull(25000) {
-            suspendCancellableCoroutine { cont ->
-                val wv = WebView(ctx)
-                wv.settings.javaScriptEnabled = false
-                wv.settings.allowFileAccess = true
-                wv.webViewClient = object : android.webkit.WebViewClient() {
-                    override fun onPageFinished(view: WebView, u: String) {
-                        var lastH = -1
-                        var stable = 0
-                        var tries = 0
-                        fun tick() {
-                            tries++
-                            val h = (view.contentHeight * view.scale).toInt().coerceIn(200, 12000)
-                            if (h == lastH) stable++ else { stable = 0; lastH = h }
-                            if (stable >= 3 || tries > 55) {
-                                view.post {
-                                    val h2 = lastH.coerceAtLeast(200)
-                                    try {
-                                        val bmp = Bitmap.createBitmap(widthPx, h2, Bitmap.Config.ARGB_8888)
-                                        val cvs = android.graphics.Canvas(bmp)
-                                        cvs.drawColor(android.graphics.Color.WHITE)
-                                        view.measure(
-                                            android.view.View.MeasureSpec.makeMeasureSpec(widthPx, android.view.View.MeasureSpec.EXACTLY),
-                                            android.view.View.MeasureSpec.makeMeasureSpec(h2, android.view.View.MeasureSpec.EXACTLY))
-                                        view.layout(0, 0, widthPx, h2)
-                                        view.draw(cvs)
-                                        out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                                        bmp.recycle()
-                                    } catch (_: Throwable) { }
-                                    wv.destroy()
-                                    if (cont.isActive) cont.resume(Unit)
-                                }
-                            } else view.postDelayed({ tick() }, 400)
-                        }
-                        view.postDelayed({ tick() }, 400)
+        try {
+            // 1) 等页面加载完成 + 内容高度连续 3 次稳定(图片/字体异步加载完高度才定)
+            val loaded = kotlinx.coroutines.withTimeoutOrNull(20000) {
+                suspendCancellableCoroutine { cont ->
+                    var lastH = -1
+                    var stable = 0
+                    var tries = 0
+                    fun tick() {
+                        tries++
+                        val h = wv.contentHeight
+                        if (h == lastH) stable++ else { stable = 0; lastH = h }
+                        if (stable >= 3 || tries > 60) { if (cont.isActive) cont.resume(Unit) }
+                        else wv.postDelayed({ tick() }, 300)
                     }
+                    wv.webViewClient = object : android.webkit.WebViewClient() {
+                        override fun onPageFinished(view: WebView, u: String) {
+                            view.postDelayed({ tick() }, 400)
+                        }
+                    }
+                    wv.loadDataWithBaseURL("file:///android_asset/", full, "text/html", "utf-8", null)
                 }
-                wv.layout(0, 0, widthPx, 400)
-                wv.loadDataWithBaseURL("file:///android_asset/", full, "text/html", "utf-8", null)
             }
+            if (loaded == null) return
+            // 2) 计算长图尺寸(带像素总量上限，超大内容等比缩小，避免 OOM)
+            val cssH = wv.contentHeight.coerceIn(400, 100000)
+            val physScale = wv.scale.takeIf { it > 0f } ?: 1f
+            val totalPhys = (cssH * physScale).toInt().coerceAtLeast(400)
+            val maxPixels = 16_000_000L
+            var k = 1f
+            if (widthPx.toLong() * totalPhys > maxPixels) {
+                k = Math.sqrt(maxPixels.toDouble() / (widthPx.toDouble() * totalPhys)).toFloat()
+            }
+            val bmpW = (widthPx * k).toInt().coerceAtLeast(1)
+            val bmpH = (totalPhys * k).toInt().coerceAtLeast(1)
+            val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+            val cvs = android.graphics.Canvas(bmp)
+            cvs.drawColor(android.graphics.Color.WHITE)
+            cvs.scale(k, k)
+            // 3) 逐屏滚动 + 拼接到长图(每块重叠 2px，避免接缝白线)
+            var drawnPhys = 0
+            val tilePhys = Math.min(vpH, totalPhys)
+            while (drawnPhys < totalPhys) {
+                val cssY = (drawnPhys / physScale).toInt().coerceAtLeast(0)
+                wv.scrollTo(0, cssY)
+                kotlinx.coroutines.delay(90) // 等这一屏真正绘制完
+                cvs.save()
+                cvs.translate(0f, drawnPhys.toFloat())
+                wv.draw(cvs)
+                cvs.restore()
+                drawnPhys += (tilePhys - 2).coerceAtLeast(1)
+            }
+            out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            bmp.recycle()
+        } catch (_: Throwable) {
+            // 渲染失败就交给上层提示，绝不让 APP 崩
+        } finally {
+            runCatching { if (attached) root?.removeView(wv) }
+            runCatching { wv.destroy() }
         }
     }
 }

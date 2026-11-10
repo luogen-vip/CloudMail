@@ -79,8 +79,10 @@ fun RootNav(pendingMessageId: () -> Long, onConsumePending: () -> Unit) {
 /* ================== 主页(抽屉+列表) ================== */
 
 // 跨页面文件夹跳转桥：标签管理页点某个标签→回主页并直接打开该标签的邮件列表
+// 用 mutableStateOf：主页在后台栈里时也能被感知，不再依赖“只消费一次”的时机(之前标签管理点标签
+// 偶发没反应，就是主页那次 LaunchedEffect 已经跑过、pending 值没人消费)
 object FolderBridge {
-    var pendingFolder: String? = null
+    var pendingFolder by androidx.compose.runtime.mutableStateOf<String?>(null)
     fun consume(): String? = pendingFolder.also { pendingFolder = null }
 }
 
@@ -149,13 +151,23 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     }
     LaunchedEffect(Unit) {
         refresh()
-        // 从标签管理页跳转过来：直接打开指定标签的邮件列表；同时把侧边栏收起来，
-        // 之前侧边栏保持打开状态，用户以为“点标签只是打开了侧边栏”
-        FolderBridge.consume()?.let { folder = it; reloadKey++; scope.launch { drawer.close() } }
         val pid = pendingMessageId()
         if (pid > 0) {
             onConsumePending()
             nav.navigate("detail/$pid")
+        }
+    }
+
+    // 标签管理页点标签后跳转：持续监听 pending 值(而不是只在进入主页那一次消费)，
+    // 保证从「标签管理」点任意标签都能立刻打开对应标签的邮件列表，不会点了没反应
+    val pendingFolder = FolderBridge.pendingFolder
+    LaunchedEffect(pendingFolder) {
+        pendingFolder?.let { f ->
+            FolderBridge.pendingFolder = null
+            folder = f
+            reloadKey++
+            scrollNonce++
+            runCatching { drawer.close() }
         }
     }
 
@@ -628,9 +640,18 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     // 系统返回键：多选模式下先退出多选，而不是退出 APP
     androidx.activity.compose.BackHandler(enabled = selectionMode) { exitSelection() }
 
-    // 点击防抖：连续快速点两下/两行时只在第一次导航，避免重复压栈详情页；
-    // 也不会因连点而吞掉后续点击
-    var lastNavClick by remember { mutableStateOf(0L) }
+    // 点击防抖：避免连点同一行重复压栈；用“短锁”而不是时间窗拦截，
+    // 并且每次回到列表(ON_RESUME)都会清锁——之前用 700ms 时间窗且状态跨页面残留，
+    // 出现“看完一封退回列表，点下一封第一下没反应、要再点一下才进得去”的现象
+    var navLock by remember { mutableStateOf(false) }
+    val listLife = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(listLife) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) navLock = false
+        }
+        listLife.lifecycle.addObserver(obs)
+        onDispose { listLife.lifecycle.removeObserver(obs) }
+    }
 
     val deleteIds = { ids: Set<Long>, forever: Boolean ->
         scope.launch {
@@ -746,10 +767,8 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                     onClick = {
                                         if (selectionMode) {
                                             toggleSelect(m.id, !isSel)
-                                        } else {
-                                            val now = System.currentTimeMillis()
-                                            if (now - lastNavClick < 700) return@combinedClickable
-                                            lastNavClick = now
+                                        } else if (!navLock) {
+                                            navLock = true
                                             // 点开即立刻置为已读：先更新本行(蓝点瞬间消失)并同步落库，
                                             // 再进详情；即使马上返回也不会因协程被取消而漏写已读
                                             if (!m.isRead) {
@@ -758,6 +777,8 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                                 scope.launch { runCatching { db.messages().setRead(m.id, true) } }
                                             }
                                             nav.navigate("detail/${m.id}")
+                                            // 400ms 后自动解锁；万一没跳转成功也不会把点击永久锁死
+                                            scope.launch { kotlinx.coroutines.delay(400); navLock = false }
                                         }
                                     },
                                     onLongClick = { selectionMode = true; selected = selected + m.id })
@@ -800,10 +821,10 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                     if (m.folder == "SENT" && !selectionMode) {
                                         Text("✎ 再次编辑", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary,
                                             modifier = Modifier.padding(top = 2.dp).clickable {
-                                                val now2 = System.currentTimeMillis()
-                                                if (now2 - lastNavClick > 700) {
-                                                    lastNavClick = now2
+                                                if (!navLock) {
+                                                    navLock = true
                                                     nav.navigate("reedit/${m.id}")
+                                                    scope.launch { kotlinx.coroutines.delay(400); navLock = false }
                                                 }
                                             })
                                     }

@@ -170,3 +170,51 @@ fun saveToDownloads(src: File, name: String): File {
     src.copyTo(out)
     return out
 }
+
+/**
+ * 保存附件/图片到手机(真正能被相册/文件管理器看到的公共目录)：
+ * - 图片 → 相册 Pictures/CloudMail(系统图库立刻能看到)
+ * - 视频/文档/压缩包等 → 下载 Download/CloudMail
+ * Android 10+ 走 MediaStore(分区存储，无需存储权限)；Android 9 及以下写公共目录并触发媒体扫描。
+ * 之前直接 copy 到 Download 目录：Android 10+ 分区存储下写入失败/或写进了应用沙盒，
+ * 提示“已保存成功”但在图库/文件管理器里根本找不到，就是这个原因。
+ */
+fun saveAttachment(ctx: android.content.Context, src: File, name: String, mime: String): String {
+    if (!src.exists() || src.length() == 0L) throw IllegalStateException("文件内容为空，无法保存")
+    val safeName = name.ifBlank { "attachment_${System.currentTimeMillis()}" }
+    val m = mime.ifBlank { guessMime(safeName) }
+    val isImg = m.startsWith("image/")
+    val sub = if (isImg) android.os.Environment.DIRECTORY_PICTURES else android.os.Environment.DIRECTORY_DOWNLOADS
+    if (android.os.Build.VERSION.SDK_INT >= 29) {
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, safeName)
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, m)
+            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "$sub/CloudMail")
+            put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val collection = if (isImg) android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        else android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        val resolver = ctx.contentResolver
+        val uri = resolver.insert(collection, values) ?: throw IllegalStateException("系统未允许创建这个文件")
+        val os = resolver.openOutputStream(uri) ?: throw IllegalStateException("无法写入这个文件")
+        os.use { out -> src.inputStream().use { it.copyTo(out) } }
+        values.clear()
+        values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+        resolver.update(uri, values, null, null)
+        return if (isImg) "已保存到相册 Pictures/CloudMail：$safeName（打开图库「最近」即可看到）"
+        else "已保存到 下载/CloudMail 文件夹：$safeName（用文件管理器打开「下载」即可看到）"
+    } else {
+        val dir = File(Environment.getExternalStoragePublicDirectory(sub), "CloudMail").apply { mkdirs() }
+        var out = File(dir, safeName)
+        var i = 1
+        while (out.exists()) {
+            val base = safeName.substringBeforeLast('.')
+            val ext = safeName.substringAfterLast('.', "")
+            out = File(dir, "${base}_$i.${ext.ifBlank { "bin" }}")
+            i++
+        }
+        src.inputStream().use { ins -> out.outputStream().use { ins.copyTo(it) } }
+        runCatching { android.media.MediaScannerConnection.scanFile(ctx, arrayOf(out.absolutePath), arrayOf(m), null) }
+        return "已保存：${out.absolutePath}"
+    }
+}

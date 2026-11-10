@@ -28,7 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun MessageDetailScreen(nav: NavHostController, id: Long) {
     val ctx = LocalContext.current
@@ -560,20 +560,31 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             Text("当前没有设置提醒。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        // 快捷选项一屏排开(不再需要往下滑才看到确认按钮)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             listOf("10分钟" to 10L, "30分钟" to 30L).forEach { (name, min) ->
                                 OutlinedButton(onClick = {
                                     com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, System.currentTimeMillis() + min * 60_000)
                                     hasReminder = true
                                     toast = "已设置：${min}分钟后提醒这封邮件"
-                                }) { Text(name, fontSize = 12.sp) }
+                                    showRemind = false
+                                }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) { Text(name, fontSize = 12.sp) }
                             }
                             OutlinedButton(onClick = {
+                                com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, System.currentTimeMillis() + 60 * 60_000)
+                                hasReminder = true
+                                toast = "已设置：1小时后提醒这封邮件"
+                                showRemind = false
+                            }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) { Text("1小时", fontSize = 12.sp) }
+                            if (hasReminder) OutlinedButton(onClick = {
                                 com.rogan.cloudmail.mail.ReminderWorker.cancel(ctx, m.id)
                                 hasReminder = false
                                 toast = "已取消这封邮件的稍后提醒，之后可重新设定"
-                            }) { Text("取消提醒", fontSize = 12.sp, color = Color(0xFFEF6C00)) }
+                            }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                                Text("取消提醒", fontSize = 12.sp, color = Color(0xFFEF6C00)) }
                         }
+                        Spacer(Modifier.height(10.dp))
+                        HorizontalDivider()
                         Spacer(Modifier.height(6.dp))
                         Text("自定义提醒时间(想提多久都可以，含年月日)：", fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
