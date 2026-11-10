@@ -51,7 +51,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
     var showShare by remember { mutableStateOf(false) }
     var showRemind by remember { mutableStateOf(false) }
     var busyShare by remember { mutableStateOf(false) }
-    var htmlExported by remember { mutableStateOf<File?>(null) }
+    var fileExported by remember { mutableStateOf<Pair<File, String>?>(null) }
 
     // 提示条用 Scaffold 标准 SnackbarHost：之前直接放内容层顶部被顶栏遮住看不见
     val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
@@ -116,8 +116,17 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         }) { Icon(Icons.Default.Reply, "回复") }
                         IconButton(onClick = { nav.navigate("forward/${m.id}") }) { Icon(Icons.Default.Shortcut, "转发") }
                         if (m.folder == "SENT") {
-                            IconButton(onClick = { nav.navigate("reedit/${m.id}") }) { Icon(Icons.Default.Edit, "再次编辑：原样带入收件人/主题/正文") }
-                            IconButton(onClick = { confirmRecall = true }) { Icon(Icons.Default.Undo, "撤回") }
+                            // 已发送邮件动作多，收进「⋮」菜单：之前直接平铺 8 个图标，
+                            // 顶栏被挤压(置顶图标变形、返回箭头看起来消失)
+                            var sentMenu by remember { mutableStateOf(false) }
+                            IconButton(onClick = { sentMenu = true }) { Icon(Icons.Default.MoreVert, "更多操作") }
+                            androidx.compose.material3.DropdownMenu(expanded = sentMenu,
+                                onDismissRequest = { sentMenu = false }) {
+                                androidx.compose.material3.DropdownMenuItem(text = { Text("✎ 再次编辑") },
+                                    onClick = { sentMenu = false; nav.navigate("reedit/${m.id}") })
+                                androidx.compose.material3.DropdownMenuItem(text = { Text("↩ 撤回") },
+                                    onClick = { sentMenu = false; confirmRecall = true })
+                            }
                         }
                         IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Default.Delete, "删除") }
                     }
@@ -188,7 +197,8 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 // 收件人/抄送：默认折叠成一行，不挤占头部；点“展开”看完整收件人/抄送详情，
                 // 保证下方正文浏览区始终足够大
                 var headOpen by remember(m.id) { mutableStateOf(false) }
-                val hasToLine = m.toAddr.isNotBlank() && m.folder != "SENT"
+                // 已发送的邮件同样显示收件人行：之前排除了 SENT，自己发给自己时只看到抄送看不到收件人
+                val hasToLine = m.toAddr.isNotBlank()
                 val hasCcLine = m.ccAddr.isNotBlank()
                 if (hasToLine || hasCcLine) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -459,14 +469,14 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             showShare = false
                             scope.launch(Dispatchers.IO) {
                                 val f = ShareUtils.exportEml(ctx, m, acc)
-                                withContext(Dispatchers.Main) { ShareUtils.shareFile(ctx, f, "application/octet-stream"); toast = "已导出 EML：${f.name}" }
+                                withContext(Dispatchers.Main) { fileExported = f to "application/octet-stream" }
                             }
                         }) { Icon(Icons.Default.Email, null, Modifier.size(16.dp)); Text(" 导出为 EML 邮件文件") }
                         TextButton(onClick = {
                             showShare = false
                             scope.launch(Dispatchers.IO) {
                                 val f = ShareUtils.exportHtml(ctx, m)
-                                withContext(Dispatchers.Main) { htmlExported = f }
+                                withContext(Dispatchers.Main) { fileExported = f to "text/html" }
                             }
                         }) { Icon(Icons.Default.Code, null, Modifier.size(16.dp)); Text(" 导出为 HTML 网页文件") }
                         TextButton(onClick = {
@@ -476,7 +486,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 val f = ShareUtils.exportLongImage(ctx, m)
                                 withContext(Dispatchers.Main) {
                                     busyShare = false
-                                    if (f != null) { ShareUtils.shareFile(ctx, f, "image/png"); toast = "长图已生成：${f.name}" }
+                                    if (f != null) fileExported = f to "image/png"
                                     else toast = "长图生成失败，请重试"
                                 }
                             }
@@ -485,29 +495,51 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 },
                 confirmButton = { TextButton(onClick = { showShare = false }) { Text("关闭") } })
         }
-        // HTML 导出完成后的选择：直接用浏览器打开，或分享给其他应用
-        htmlExported?.let { f ->
-            AlertDialog(onDismissRequest = { htmlExported = null },
-                title = { Text("已导出 HTML") },
-                text = { Text("文件：${f.name}\n\n可以直接用浏览器打开(离线可看，样式与邮件一致)，也可以分享给微信/QQ 等应用。") },
-                confirmButton = { TextButton(onClick = { ShareUtils.openFile(ctx, f, "text/html"); htmlExported = null }) { Text("用浏览器打开") } },
-                dismissButton = { TextButton(onClick = { ShareUtils.shareFile(ctx, f, "text/html"); htmlExported = null }) { Text("分享给其他应用") } })
+        // 导出文件完成后的选择：分享给微信/QQ 等、用应用打开、或直接保存到手机「下载」文件夹
+        fileExported?.let { (f, mime) ->
+            AlertDialog(onDismissRequest = { fileExported = null },
+                title = { Text("已导出：${f.name}") },
+                text = { Text("可以把文件分享给微信/QQ 等应用，也可以直接保存到手机的「下载」文件夹(文件管理器里能找到)，或用其他应用打开查看。") },
+                confirmButton = { TextButton(onClick = { ShareUtils.shareFile(ctx, f, mime); fileExported = null }) { Text("分享给其他应用") } },
+                dismissButton = { Row {
+                    TextButton(onClick = {
+                        toast = ShareUtils.saveToDownloads(ctx, f, mime); fileExported = null
+                    }) { Text("保存到手机") }
+                    if (mime == "text/html") TextButton(onClick = { ShareUtils.openFile(ctx, f, mime); fileExported = null }) { Text("用浏览器打开") }
+                } })
         }
-        // 稍后提醒：选一个时间，到点系统通知把这封邮件再提醒一遍(点击直达邮件)
+        // 稍后提醒：选一个时间，到点系统通知把这封邮件再提醒一遍(点击直达邮件)。
+        // 显示当前是否已有提醒；有提醒可一键取消(到点不再通知)，之后随时可重新设置
         if (showRemind) {
             var customMin by remember { mutableStateOf(TextFieldValue("30")) }
+            // 查询这封邮件是否已有进行中的提醒(WorkManager 唯一任务 reminder_<id>)
+            var hasReminder by remember(m.id) { mutableStateOf(false) }
+            LaunchedEffect(m.id) {
+                runCatching {
+                    val wis = androidx.work.WorkManager.getInstance(ctx)
+                        .getWorkInfosForUniqueWork("reminder_${m.id}").get()
+                    hasReminder = wis.any { !it.state.isFinished }
+                }
+            }
             AlertDialog(onDismissRequest = { showRemind = false },
                 title = { Text("稍后提醒") },
                 text = {
                     Column {
                         Text("到点后 APP 会发一条提醒通知，点开就是这封邮件(即使 APP 已关闭后台也生效)。",
                             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(6.dp))
+                        if (hasReminder) {
+                            Text("⏰ 这封邮件已设置了稍后提醒(进行中)。可在下面重新设定新时间覆盖，或点「取消提醒」关掉。",
+                                fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
+                        } else {
+                            Text("当前没有设置提醒。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                         Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             listOf("10分钟" to 10L, "30分钟" to 30L, "1小时" to 60L).forEach { (name, min) ->
                                 OutlinedButton(onClick = {
                                     com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, System.currentTimeMillis() + min * 60_000)
-                                    showRemind = false
+                                    hasReminder = true
                                     toast = "已设置：${min}分钟后提醒这封邮件"
                                 }) { Text(name, fontSize = 12.sp) }
                             }
@@ -520,19 +552,27 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 c.set(java.util.Calendar.MINUTE, 0)
                                 c.set(java.util.Calendar.SECOND, 0)
                                 com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, c.timeInMillis)
-                                showRemind = false
+                                hasReminder = true
                                 toast = "已设置：明天早上9点提醒这封邮件"
-                            }) { Text("明天早上9点", fontSize = 12.sp) }
+                            }) { Text("明早9点", fontSize = 12.sp) }
+                            OutlinedButton(onClick = {
+                                com.rogan.cloudmail.mail.ReminderWorker.cancel(ctx, m.id)
+                                hasReminder = false
+                                toast = "已取消这封邮件的稍后提醒"
+                            }) { Text("取消提醒", fontSize = 12.sp, color = Color(0xFFEF6C00)) }
                         }
                         Spacer(Modifier.height(6.dp))
+                        Text("自定义提醒：输入分钟数(如 45 = 45分钟后提醒)", fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             TextField(value = customMin, onValueChange = { customMin = it }, singleLine = true,
-                                modifier = Modifier.weight(1f), placeholder = { Text("自定义分钟数，如 45") })
+                                modifier = Modifier.weight(1f),
+                                placeholder = { Text("分钟数，如 45(1小时=60)") })
                             TextButton(onClick = {
                                 val n = customMin.text.trim().toLongOrNull()
                                 if (n == null || n <= 0) { toast = "请输入正整数分钟数"; return@TextButton }
                                 com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, System.currentTimeMillis() + n * 60_000)
-                                showRemind = false
+                                hasReminder = true
                                 toast = "已设置：${n}分钟后提醒这封邮件"
                             }) { Text("设定") }
                         }
