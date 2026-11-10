@@ -111,7 +111,7 @@ fun BrowserScreen(nav: NavHostController, url: String) {
                             // 渲染进程崩溃接管：有些网站(大量动画/视频/复杂 JS)会让 WebView 渲染进程崩溃，
                             // 系统默认直接杀掉整个 APP 进程(表现就是 APP 直接消失回桌面)；这里返回 true 接管，
                             // 只重建 WebView 本身，APP 不退出
-                            override fun onRenderProcessGone(view: android.webkit.WebView, detail: android.webkit.WebView.RenderProcessGoneDetail): Boolean {
+                            override fun onRenderProcessGone(view: android.webkit.WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
                                 runCatching {
                                     (view.parent as? android.view.ViewGroup)?.removeView(view)
                                     view.destroy()
