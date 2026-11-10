@@ -80,7 +80,10 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
-                title = { Text("邮件详情", fontSize = 18.sp) },
+                // maxLines=1：已发送邮件顶栏图标多，标题“邮件详情”被挤压换行时
+                // 会在置顶按钮左边竖着露出“件详”两个字，现在单行省略不再变形
+                title = { Text("邮件详情", fontSize = 17.sp, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, softWrap = false) },
                 navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } },
                 actions = {
                     if (m != null) {
@@ -364,8 +367,8 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 TextButton(onClick = { openWithProvider(ctx, File(a.path), a.mime, a.name) }) { Text("打开", fontSize = 12.sp) }
                                 TextButton(onClick = {
                                     scope.launch(Dispatchers.IO) {
-                                        val saved = saveToDownloads(File(a.path), File(a.path).name)
-                                        withContext(Dispatchers.Main) { toast = "已保存到下载文件夹：${saved.name}" }
+                                        val saved = ShareUtils.saveToDownloads(ctx, File(a.path), a.name.ifBlank { File(a.path).name }, a.mime)
+                                        withContext(Dispatchers.Main) { toast = saved }
                                     }
                                 }) { Text("保存", fontSize = 12.sp) }
                             }
@@ -385,8 +388,8 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 confirmButton = {
                     TextButton(onClick = {
                         scope.launch(Dispatchers.IO) {
-                            val saved = saveToDownloads(File(img.path), img.name)
-                            withContext(Dispatchers.Main) { toast = "已保存到下载文件夹：${saved.name}" }
+                            val saved = ShareUtils.saveToDownloads(ctx, File(img.path), img.name, "")
+                            withContext(Dispatchers.Main) { toast = saved }
                         }
                     }) { Text("保存到相册/下载") }
                 },
@@ -581,20 +584,24 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         com.rogan.cloudmail.ui.Stepper("小时", rh, 0, 23) { rh = it }
                         com.rogan.cloudmail.ui.Stepper("分钟", rmi, 0, 59) { rmi = it }
                         Text("将提醒：${fmtFull(target)}", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                        TextButton(onClick = {
-                            when {
-                                dateBad -> toast = "$rmo 月没有 $rdy 日，请修改日期"
-                                target <= System.currentTimeMillis() -> toast = "所选时间已经过去了，请往后调"
-                                else -> {
-                                    com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, target)
-                                    hasReminder = true
-                                    toast = "已设置：${fmtFull(target)} 提醒这封邮件"
-                                }
-                            }
-                        }) { Text("按这个时间提醒") }
                     }
                 },
-                confirmButton = { TextButton(onClick = { showRemind = false }) { Text("关闭") } })
+                // 确认按钮固定在弹窗底栏(不再藏在滚动区最下面)：打开弹窗一眼就能看到「按这个时间提醒」
+                confirmButton = {
+                    TextButton(onClick = {
+                        when {
+                            dateBad -> toast = "$rmo 月没有 $rdy 日，请修改日期"
+                            target <= System.currentTimeMillis() -> toast = "所选时间已经过去了，请往后调"
+                            else -> {
+                                com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, target)
+                                hasReminder = true
+                                showRemind = false
+                                toast = "已设置：${fmtFull(target)} 提醒这封邮件"
+                            }
+                        }
+                    }) { Text("按这个时间提醒") }
+                },
+                dismissButton = { TextButton(onClick = { showRemind = false }) { Text("关闭") } })
         }
         // 标签对话框：勾选/取消该邮件所属标签；还没有标签时可直接新建，邮件自动加入
         if (showLabels) {
