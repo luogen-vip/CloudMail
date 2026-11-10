@@ -87,8 +87,9 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } },
                 actions = {
                     if (m != null) {
-                        // 置顶/取消置顶：置顶邮件在所有列表最上面，多封按置顶时间依次排序
-                        IconButton(onClick = {
+                        // 置顶/取消置顶：改成文字按钮(之前的图钉图标被误认成“两个点，点了没反应”，
+                        // 实际是点击后列表里才看到效果，顶栏没有反馈)；文字按钮状态一目了然，点击有反馈
+                        TextButton(onClick = {
                             scope.launch {
                                 val nv = if (m.pinnedAt > 0) 0L else System.currentTimeMillis()
                                 db.messages().setPinned(m.id, nv)
@@ -96,8 +97,10 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 m0 = m0?.copy(pinnedAt = nv)
                                 toast = if (nv > 0) "已置顶，会显示在列表最上面" else "已取消置顶"
                             }
-                        }) { Icon(Icons.Default.PushPin, if (m.pinnedAt > 0) "取消置顶" else "置顶",
-                            tint = if (m.pinnedAt > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
+                        }, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                            Text(if (m.pinnedAt > 0) "取消置顶" else "置顶", fontSize = 12.sp,
+                                color = if (m.pinnedAt > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                        }
                         if (m.folder != "SENT") {
                             IconButton(onClick = { showShare = true }) { Icon(Icons.Default.Share, "分享/导出") }
                         }
@@ -177,8 +180,10 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 // 现在一行放不下会自动折到下一行，备注/加联系人/标签/往来邮件/稍后提醒全部可见
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(0.dp),
                     modifier = Modifier.fillMaxWidth()) {
+                    // 按钮统一压缩高度(28dp)：之前默认高度太高，第二行按钮把邮件正文滑动区压矮
                     if (m.folder == "INBOX") {
-                        TextButton(onClick = { showRemark = true }, contentPadding = PaddingValues(4.dp)) {
+                        TextButton(onClick = { showRemark = true }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                            modifier = Modifier.height(28.dp)) {
                             Text(if (contact?.remark.isNullOrBlank()) "备注" else "改备注", fontSize = 11.sp)
                         }
                         OutlinedButton(onClick = {
@@ -193,21 +198,25 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                     nav.navigate("contactEdit/$newId")
                                 }
                             }
-                        }, contentPadding = PaddingValues(4.dp)) { Text("加联系人", fontSize = 11.sp) }
+                        }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                            modifier = Modifier.height(28.dp)) { Text("加联系人", fontSize = 11.sp) }
                     }
                     // 标签入口：所有文件夹的邮件都可以打标签(可多选；没有标签时可直接新建并自动加入)
-                    TextButton(onClick = { showLabels = true }, contentPadding = PaddingValues(4.dp)) {
+                    TextButton(onClick = { showLabels = true }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)) {
                         Text("标签", fontSize = 11.sp)
                     }
                     // 往来邮件：一键查看和这个地址的全部往来(我发的+TA发的)
                     TextButton(onClick = {
                         val addr = if (m.folder == "SENT") m.toAddr.substringBefore(",").trim() else m.fromAddr
                         if (addr.isNotBlank()) nav.navigate("conv/" + android.net.Uri.encode(addr))
-                    }, contentPadding = PaddingValues(4.dp)) {
+                    }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)) {
                         Text("往来邮件", fontSize = 11.sp)
                     }
                     // 稍后提醒：到点后系统通知再把这封邮件提醒一遍(点击直达本邮件)
-                    TextButton(onClick = { showRemind = true }, contentPadding = PaddingValues(4.dp)) {
+                    TextButton(onClick = { showRemind = true }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)) {
                         Text("稍后提醒", fontSize = 11.sp)
                     }
                 }
@@ -566,6 +575,18 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             Text("当前没有设置提醒。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Spacer(Modifier.height(8.dp))
+                        // 关闭提醒做成醒目大按钮：之前只有个不起眼的「取消提醒」小字按钮，很多用户找不到关闭入口；
+                        // 关闭后到点不再提醒，随时可以重新打开/重新设时间
+                        if (hasReminder) {
+                            Button(onClick = {
+                                com.rogan.cloudmail.mail.ReminderWorker.cancel(ctx, m.id)
+                                hasReminder = false
+                                toast = "已关闭这封邮件的提醒，到点不再通知；可随时重新设置"
+                            }, colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFFFF3E0), contentColor = Color(0xFFEF6C00)),
+                                modifier = Modifier.fillMaxWidth()) { Text("✕ 关闭提醒", fontSize = 13.sp) }
+                            Spacer(Modifier.height(6.dp))
+                        }
                         // 快捷选项一屏排开(不再需要往下滑才看到确认按钮)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             listOf("10分钟" to 10L, "30分钟" to 30L).forEach { (name, min) ->
