@@ -52,6 +52,8 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
     var showRemind by remember { mutableStateOf(false) }
     var busyShare by remember { mutableStateOf(false) }
     var fileExported by remember { mutableStateOf<Pair<File, String>?>(null) }
+    // 正文滚动位置：点图片预览/内置浏览器返回后恢复到之前的位置，不回顶
+    var bodyScrollY by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableIntStateOf(0) }
 
     // 提示条用 Scaffold 标准 SnackbarHost：之前直接放内容层顶部被顶栏遮住看不见
     val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
@@ -290,6 +292,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
             // WebView 常驻不拆装：之前“加载中/失败/正文”三个分支互切会整体销毁重建视图，
             // 只用透明度和覆盖层控制显示，消除闪白
             Box(Modifier.fillMaxWidth().weight(1f)) {
+                androidx.compose.runtime.key(loadKey) {
                 androidx.compose.ui.viewinterop.AndroidView(
                 factory = { viewCtx ->
                     android.webkit.WebView(viewCtx).apply {
@@ -313,6 +316,15 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                     }
                                 }
                             }
+                            // 渲染进程崩溃时接管：不让系统杀掉整个 APP，恢复后位置不丢
+                            override fun onRenderProcessGone(view: android.webkit.WebView, detail: android.webkit.WebView.RenderProcessGoneDetail): Boolean {
+                                runCatching {
+                                    (view.parent as? android.view.ViewGroup)?.removeView(view)
+                                    view.destroy()
+                                }
+                                loadKey++
+                                return true
+                            }
                         }
                         // 点击正文中的图片 → 全屏预览/保存。
                         // 必须用 GestureDetector 的 onSingleTapConfirmed：之前直接监听 ACTION_UP，
@@ -333,15 +345,24 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             gd.onTouchEvent(ev)
                             false
                         }
+                        // 实时记录正文滚动位置：预览/浏览器返回后恢复到原位置
+                        setOnScrollChangeListener { v, _, _, _, _ ->
+                            bodyScrollY = v.scrollY
+                        }
                     }
                 },
                 update = { wv ->
-                    // baseUrl 指到 assets：正文里的 @font-face 才能加载 APP 内置字体(衬线/楷体)，
-                    // 字体效果和发送时编辑区看到的完全一致
-                    wv.loadDataWithBaseURL("file:///android_asset/", html, "text/html", "utf-8", null)
+                    // 只在正文真正变化时才重载：之前弹窗开关等任何重组都会 loadDataWithBaseURL 导致回到顶部
+                    if (wv.tag != html) {
+                        wv.tag = html
+                        wv.loadDataWithBaseURL("file:///android_asset/", html, "text/html", "utf-8", null)
+                        // 页面重建后恢复之前的阅读位置
+                        wv.postDelayed({ runCatching { wv.scrollTo(0, bodyScrollY) } }, 250)
+                    }
                     wv.alpha = if (loading || !m.loaded) 0f else 1f
                 },
                 modifier = Modifier.fillMaxSize())
+                }
                 if (loading) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
