@@ -2,6 +2,7 @@ package com.rogan.cloudmail.ui
 
 import android.content.Intent
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,6 +42,7 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
     var showImg by remember { mutableStateOf<File?>(null) }
     var starBusy by remember { mutableStateOf(false) }
     var showRemark by remember { mutableStateOf(false) }
+    var showLabels by remember { mutableStateOf(false) }
     var contact by remember { mutableStateOf<Contact?>(null) }
     var m0 by remember { mutableStateOf<MailMessage?>(null) }
     var recallResult by remember { mutableStateOf<String?>(null) }
@@ -149,6 +151,10 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             }
                         }, contentPadding = PaddingValues(4.dp)) { Text("加联系人", fontSize = 11.sp) }
                     }
+                    // 标签入口：所有文件夹的邮件都可以打标签(可多选；没有标签时可直接新建并自动加入)
+                    TextButton(onClick = { showLabels = true }, contentPadding = PaddingValues(4.dp)) {
+                        Text("标签", fontSize = 11.sp)
+                    }
                 }
                 // 收件人/抄送：默认折叠成一行，不挤占头部；点“展开”看完整收件人/抄送详情，
                 // 保证下方正文浏览区始终足够大
@@ -175,10 +181,20 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 }
                 if (m.isAd) Text("此邮件疑似广告邮件", fontSize = 11.sp, color = Color(0xFFEF6C00),
                     modifier = Modifier.padding(top = 2.dp))
-                // 退信提示(判断逻辑与列表/通知共用同一个函数，保证三处一致)
+                // 退信提示(判断逻辑与列表/通知共用同一个函数，保证三处一致)；
+                // 并解析退信正文给出具体失败原因(域名不存在/地址不存在/已满/被拒收…)
                 if (isBounceMail(m.fromAddr, m.subject)) {
-                    Text("⚠ 这是退信通知：你之前发送的邮件未能成功送达对方服务器(可能对方邮箱不存在/已满/拒收)。详情见正文。",
-                        fontSize = 12.sp, color = Color(0xFFD32F2F), fontWeight = FontWeight.Bold,
+                    val reason = remember(m.id, m.bodyHtml) {
+                        bounceReason(m.snippet + " " + m.bodyHtml.take(8000))
+                    }
+                    val fa = remember(m.id, m.bodyHtml) {
+                        bounceFailedAddr(m.snippet + " " + m.bodyHtml.take(8000))
+                    }
+                    Text(buildString {
+                        append("⚠ 这是退信通知：你之前发送的邮件没有真正送达。原因：$reason")
+                        if (fa != null) append("\n失败地址：$fa")
+                        append("\n(下方正文是服务器退信原文)")
+                    }, fontSize = 12.sp, color = Color(0xFFD32F2F), fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(top = 4.dp))
                 }
             }
@@ -380,6 +396,72 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 title = { Text(if (r.startsWith("撤回成功")) "✓ 撤回成功" else "撤回结果") },
                 text = { Text(r, fontSize = 14.sp) },
                 confirmButton = { TextButton(onClick = { recallResult = null }) { Text("知道了") } })
+        }
+        // 标签对话框：勾选/取消该邮件所属标签；还没有标签时可直接新建，邮件自动加入
+        if (showLabels) {
+            var labelIds by remember(showLabels) { mutableStateOf<Set<Long>>(emptySet()) }
+            var allLabels by remember(showLabels) { mutableStateOf<List<Label>>(emptyList()) }
+            var newName by remember { mutableStateOf("") }
+            LaunchedEffect(showLabels) {
+                val (ls, ids) = withContext(Dispatchers.IO) {
+                    db.labels().all() to db.mailLabels().labelIdsOf(m.id).toSet()
+                }
+                allLabels = ls; labelIds = ids
+            }
+            AlertDialog(onDismissRequest = { showLabels = false },
+                title = { Text("移入标签") },
+                text = {
+                    Column(Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState())) {
+                        if (allLabels.isEmpty()) {
+                            Text("还没有标签。在下面直接新建一个，这封邮件会自动加入。",
+                                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        allLabels.forEach { lb ->
+                            // 整行可点：点行=切换勾选(与勾选框等效)，操作方便
+                            Row(Modifier.fillMaxWidth().clickable {
+                                val add = lb.id !in labelIds
+                                scope.launch(Dispatchers.IO) {
+                                    if (add) db.mailLabels().insert(MailLabel(lb.id, m.id))
+                                    else db.mailLabels().remove(lb.id, m.id)
+                                }
+                                labelIds = if (add) labelIds + lb.id else labelIds - lb.id
+                            }.heightIn(min = 40.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = lb.id in labelIds,
+                                    onCheckedChange = { add ->
+                                        scope.launch(Dispatchers.IO) {
+                                            if (add) db.mailLabels().insert(MailLabel(lb.id, m.id))
+                                            else db.mailLabels().remove(lb.id, m.id)
+                                        }
+                                        labelIds = if (add) labelIds + lb.id else labelIds - lb.id
+                                    })
+                                Text(lb.name, fontSize = 14.sp)
+                            }
+                        }
+                        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextField(value = newName, onValueChange = { newName = it },
+                                placeholder = { Text("新建标签名") }, singleLine = true,
+                                modifier = Modifier.weight(1f))
+                            TextButton(onClick = {
+                                val n = newName.trim()
+                                if (n.isEmpty()) return@TextButton
+                                scope.launch(Dispatchers.IO) {
+                                    val existing = db.labels().all().firstOrNull { it.name == n }
+                                    val lid = existing?.id ?: db.labels().insert(Label(name = n, createdAt = System.currentTimeMillis()))
+                                    db.mailLabels().insert(MailLabel(lid, m.id))
+                                    withContext(Dispatchers.Main) {
+                                        allLabels = db.labels().all()
+                                        labelIds = labelIds + lid
+                                        newName = ""
+                                        toast = "已创建标签「$n」并加入这封邮件"
+                                    }
+                                }
+                            }) { Text("新建并加入") }
+                        }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { showLabels = false }) { Text("完成") } })
         }
         // 备注对话框：无需添加联系人也能备注/取消备注
         if (showRemark) {
