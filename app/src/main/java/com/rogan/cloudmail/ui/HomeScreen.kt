@@ -292,7 +292,9 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     // 轮询兑底降频到每 3 秒一次(推送已经在毫秒级收信，高频轮询只会争抢 IMAP 连接和刷新列表，
     // 造成滑动顿住/正文加载等待)，pushVersion 检查仍保持 500ms
     LaunchedEffect(accounts.isNotEmpty()) {
-        var lastPush = -1
+        // 初始就取当前值：从详情页返回是全新组合，若从 -1 开始会把返回前就存在的 pushVersion
+        // 误判为“刚有新邮件”而回顶；只有本组合存活期间 pushVersion 真增长(真新邮件)才回顶
+        var lastPush = com.rogan.cloudmail.mail.MailService.pushVersion
         var lastSyncAt = 0L
         while (accounts.isNotEmpty()) {
             kotlinx.coroutines.delay(500)
@@ -597,8 +599,16 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             kotlinx.coroutines.delay(500)
         }
     }
+    // 记住本组合上次的触发键：从详情页返回时是全新组合（键值与上轮相同），
+    // 不能误判为“用户换了文件夹/点了排序”而强行回顶；只有本组合内键真的变化才回顶
+    var prevSortKeys by remember { mutableStateOf(folder to sortMode to sortNonce to scrollNonce) }
     LaunchedEffect(folder, sortMode, sortNonce, scrollNonce) {
-        runCatching { loadList() }.getOrNull()?.let { applyList(it) }
+        val keys = folder to sortMode to sortNonce to scrollNonce
+        val userChanged = keys != prevSortKeys
+        prevSortKeys = keys
+        val n = runCatching { loadList() }.getOrNull()
+        if (n != null && n != msgs) applyList(n)
+        if (!userChanged) return@LaunchedEffect
         // 等一帧让新列表先上屏再回顶：之前 scrollToItem 和新数据重组赛跑，
         // 偶发“点了排序但没回到顶部”；再补一次延迟回顶双保险
         androidx.compose.runtime.withFrameNanos { }
