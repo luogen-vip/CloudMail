@@ -139,7 +139,8 @@ fun LabelsScreen(nav: NavHostController) {
                                     else {
                                         // 点标签直接打开该标签的邮件列表(回到主页并切换文件夹)
                                         FolderBridge.pendingFolder = "label:${lb.id}"
-                                        nav.popBackStack()
+                                        // 主页一定在返回栈里(标签管理是从主页进来的)；万一不在就直接导航回主页
+                                        if (!nav.popBackStack()) nav.navigate("home") { popUpTo("home") { inclusive = true } }
                                     }
                                 },
                                 onLongClick = { selectionMode = true; selected = selected + lb.id }
