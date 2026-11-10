@@ -63,11 +63,26 @@ fun RootNav(pendingMessageId: () -> Long, onConsumePending: () -> Unit) {
         }
         composable("settings") { SettingsScreen(nav) }
         composable("labels") { LabelsScreen(nav) }
+        composable("browser/{url}") { back ->
+            BrowserScreen(nav, java.net.URLDecoder.decode(back.arguments?.getString("url") ?: "", "UTF-8"))
+        }
+        composable("conv/{addr}") { back ->
+            ConversationScreen(nav, java.net.URLDecoder.decode(back.arguments?.getString("addr") ?: "", "UTF-8"))
+        }
+        composable("reedit/{id}") { back ->
+            ComposeScreen(nav, draftId = -1L, presetTo = "", reeditId = back.arguments?.getString("id")?.toLong() ?: -1L)
+        }
         composable("search") { SearchScreen(nav) }
     }
 }
 
 /* ================== 主页(抽屉+列表) ================== */
+
+// 跨页面文件夹跳转桥：标签管理页点某个标签→回主页并直接打开该标签的邮件列表
+object FolderBridge {
+    var pendingFolder: String? = null
+    fun consume(): String? = pendingFolder.also { pendingFolder = null }
+}
 
 // 排序模式: 0=最新优先 1=最早优先 2=大小大→小 3=大小小→大
 @OptIn(ExperimentalMaterial3Api::class)
@@ -129,6 +144,8 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     }
     LaunchedEffect(Unit) {
         refresh()
+        // 从标签管理页跳转过来：直接打开指定标签的邮件列表
+        FolderBridge.consume()?.let { folder = it; reloadKey++ }
         val pid = pendingMessageId()
         if (pid > 0) {
             onConsumePending()
@@ -257,6 +274,8 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                     lastRefreshAt = System.currentTimeMillis()
                     refresh()
                 }
+                // 从标签管理页点了某个标签回来：切到该标签的邮件列表
+                FolderBridge.consume()?.let { folder = it; reloadKey++ }
             }
         }
         life.lifecycle.addObserver(obs)
@@ -474,6 +493,9 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             2 -> dedup.sortedByDescending { it.size }
             3 -> dedup.sortedBy { it.size }
             else -> dedup.sortedByDescending { it.date }
+        }.let { base ->
+            // 置顶邮件永远在最上面；多封置顶按置顶时间倒序依次排列(后置顶的更靠上)
+            base.sortedWith(compareByDescending<MailMessage> { it.pinnedAt > 0 }.thenByDescending { it.pinnedAt })
         }
     }
     // 关键修复：加载数据和回顶放在同一个协程里顺序执行。
@@ -532,6 +554,10 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
         }
     }
 
+    // 时间文本随“刚刚/N分钟前”自动更新(每 30 秒重算一次当前时间)
+    var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(30000); nowTick = System.currentTimeMillis() } }
+
     // 多选模式
     var selectionMode by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(setOf<Long>()) }
@@ -574,7 +600,11 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                         Text("正在同步邮件，请稍候…", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 } else {
-                    Text(if (folder == "trash") "回收站为空" else "暂无邮件", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(when {
+                        folder == "trash" -> "回收站为空"
+                        folder.startsWith("label:") -> "该标签还没有邮件：打开任意邮件点「标签」即可加入"
+                        else -> "暂无邮件"
+                    }, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             return
@@ -630,6 +660,20 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                     }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                         Text(if (folder == "trash") "彻底删除" else "删除", color = Color.White, fontSize = 12.sp)
                     }
+                    // 标签文件夹里：多选后可把这些邮件移出该标签(邮件本身不删)
+                    if (folder.startsWith("label:")) {
+                        TextButton(onClick = {
+                            scope.launch(Dispatchers.IO) {
+                                val lid = folder.substringAfter(":").toLong()
+                                selected.forEach { db.mailLabels().remove(lid, it) }
+                                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                    exitSelection(); refreshParent(); reload()
+                                }
+                            }
+                        }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                            Text("移出标签", color = Color.White, fontSize = 12.sp)
+                        }
+                    }
                     TextButton(onClick = { exitSelection() }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("取消", color = Color.White, fontSize = 12.sp) }
                 }
             }
@@ -674,7 +718,7 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                         Text(shownName, fontSize = 15.sp,
                                             fontWeight = if (!m.isRead) FontWeight.Bold else FontWeight.Normal,
                                             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                        Text(fmtTime(m.date), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(fmtTime(m.date, nowTick), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                     Text(m.subject.ifBlank { "(无主题)" }, fontSize = 14.sp,
                                         fontWeight = if (!m.isRead) FontWeight.Bold else FontWeight.Normal,
@@ -682,6 +726,9 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                     Text(m.snippet, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        // 置顶图钉：一眼看出哪些邮件被置顶了
+                                        if (m.pinnedAt > 0) Icon(Icons.Default.PushPin, "已置顶", Modifier.size(13.dp),
+                                            tint = MaterialTheme.colorScheme.primary)
                                         if (m.isAd) Text("广告", fontSize = 10.sp, color = Color.White,
                                             modifier = Modifier.background(Color(0xFFEF6C00), MaterialTheme.shapes.small).padding(horizontal = 4.dp, vertical = 1.dp))
                                         // 退信邮件红色徽标：一眼看出这封信是系统退信(发送未真正送达)，不是普通新邮件
@@ -693,6 +740,17 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                                         if (m.size > 0) Text(fmtSize(m.size), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                         if (m.folder == "SENT") Text("已发送至 ${m.toAddr}", fontSize = 11.sp,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    // 已发送的邮件：一键再次编辑(原样带入收件人/主题/正文，改完再发)
+                                    if (m.folder == "SENT" && !selectionMode) {
+                                        Text("✎ 再次编辑", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(top = 2.dp).clickable {
+                                                val now2 = System.currentTimeMillis()
+                                                if (now2 - lastNavClick > 700) {
+                                                    lastNavClick = now2
+                                                    nav.navigate("reedit/${m.id}")
+                                                }
+                                            })
                                     }
                                 }
                             }
