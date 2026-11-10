@@ -62,6 +62,7 @@ fun RootNav(pendingMessageId: () -> Long, onConsumePending: () -> Unit) {
             EditAccountScreen(nav, back.arguments?.getString("id")?.toLong() ?: -1L)
         }
         composable("settings") { SettingsScreen(nav) }
+        composable("labels") { LabelsScreen(nav) }
         composable("search") { SearchScreen(nav) }
     }
 }
@@ -77,7 +78,8 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
     val scope = rememberCoroutineScope()
     val drawer = rememberDrawerState(DrawerValue.Closed)
     // folder/sortMode 用 rememberSaveable：进入详情页返回后仍保留当前文件夹(星标/未读/已发送/回收站)，不再重置回“全部邮件”
-    var folder by rememberSaveable { mutableStateOf("all") } // all/unread/starred/sent/outbox/trash/account:ID
+    var folder by rememberSaveable { mutableStateOf("all") } // all/unread/starred/sent/outbox/trash/account:ID/label:ID
+    var labels by remember { mutableStateOf<List<com.rogan.cloudmail.data.Label>>(emptyList()) }
     var accounts by remember { mutableStateOf<List<Account>>(emptyList()) }
     var unreadMap by remember { mutableStateOf<Map<Long, Int>>(emptyMap()) }
     var syncing by remember { mutableStateOf(false) }
@@ -107,18 +109,20 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
         scope.launch {
             // 数据库查询移到 IO 线程：之前在主线程读库，账号/邮件多时会卡顿一下，
             // 表现为滑动列表偶发顿住、点击没反应，再操作一次才正常
-            val (accs, uMap, ob, empty) = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            val (accs, uMap, ob, empty, lbs) = kotlinx.coroutines.withContext(Dispatchers.IO) {
                 val a = db.accounts().all()
                 a.forEach { com.rogan.cloudmail.mail.MailService.startPush(ctx, it, db) }
                 val u = a.associate { it.id to db.messages().unreadCount(it.id) }
                 val o = db.outbox().all().size
                 val e = db.messages().countAll() == 0
-                listOf(a, u, o, e)
+                val l = db.labels().all()
+                listOf(a, u, o, e, l)
             }
             accounts = accs as List<com.rogan.cloudmail.data.Account>
             unreadMap = uMap as Map<Long, Int>
             outboxCount = ob as Int
             dbEmpty = empty as Boolean
+            labels = lbs as List<com.rogan.cloudmail.data.Label>
             if (folder.startsWith("account:") && accounts.none { it.id.toString() == folder.substringAfter(":") }) folder = "all"
         }
         Unit
@@ -233,6 +237,8 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
         while (true) {
             kotlinx.coroutines.delay(2000)
             runCatching { outboxCount = kotlinx.coroutines.withContext(Dispatchers.IO) { db.outbox().all().size } }
+            // 标签列表也实时刷新：详情页里新建/删除标签后抽屉马上同步
+            runCatching { labels = kotlinx.coroutines.withContext(Dispatchers.IO) { db.labels().all() } }
         }
     }
 
@@ -305,6 +311,24 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                     FolderItem(Icons.Default.Send, "已发送", folder == "sent") { folder = "sent"; reloadKey++; scope.launch { drawer.close() } }
                     FolderItem(Icons.Default.Schedule, "草稿/待发送", folder == "outbox") { folder = "outbox"; reloadKey++; scope.launch { drawer.close() } }
                     FolderItem(Icons.Default.Delete, "已删除(回收站)", folder == "trash") { folder = "trash"; reloadKey++; scope.launch { drawer.close() } }
+                    HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                    // 标签区：每个标签像一个文件夹，点进去只看打上该标签的邮件；
+                    // “管理”进入标签管理页(新建/勾选删除/全选删除)
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("标签", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.weight(1f))
+                        Text("管理/新建", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable { nav.navigate("labels") }.padding(4.dp))
+                    }
+                    if (labels.isEmpty()) {
+                        Text("暂无标签，点「管理/新建」创建", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                    }
+                    labels.forEach { lb ->
+                        FolderItem(Icons.Default.Label, lb.name, folder == "label:${lb.id}") {
+                            folder = "label:${lb.id}"; reloadKey++; scope.launch { drawer.close() }
+                        }
+                    }
                     Spacer(Modifier.height(16.dp))
                     Text("作者：罗根", modifier = Modifier.padding(horizontal = 16.dp), fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -396,6 +420,7 @@ private fun folderTitle(f: String) = when {
     f == "outbox" -> "草稿/待发送"
     f == "trash" -> "已删除(回收站)"
     f.startsWith("account:") -> "邮箱邮件"
+    f.startsWith("label:") -> "标签邮件"
     else -> "邮件"
 }
 
@@ -425,6 +450,7 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             folder == "sent" -> db.messages().sent()
             folder == "trash" -> db.messages().trash()
             folder.startsWith("account:") -> db.messages().byAccount(folder.substringAfter(":").toLong())
+            folder.startsWith("label:") -> db.mailLabels().messagesForLabel(folder.substringAfter(":").toLong())
             else -> db.messages().allMail()
         }
         // 同一封邮件只显示一条(按 Message-ID 合并)：
@@ -454,6 +480,9 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     // reloadKey(后台同步/操作后刷新)不回顶，避免正在浏览时被强行拉回顶部；
     // 换文件夹/点排序/新邮件到达才回顶
     fun applyList(n: List<MailMessage>) { msgListCache[folder] = n; msgs = n; firstLoad = false }
+    // 从详情页返回的时刻：返回后 1.5 秒内轮询发现的数据变化只写缓存不立即赋值，
+    // 避免刚返回的第一次重组与用户的第一下点击/滑动撞车(表现为“第一下没反应，第二下才行”)
+    var lastResumeAt by remember { mutableStateOf(0L) }
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     LaunchedEffect(folder, reloadKey) { applyList(loadList()) }
     LaunchedEffect(folder, sortMode, sortNonce, scrollNonce) {
@@ -466,11 +495,31 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     LaunchedEffect(folder) {
         while (true) {
             kotlinx.coroutines.delay(800)
-            runCatching { val n = loadList(); if (n != msgs) applyList(n) }
+            runCatching {
+                val n = loadList()
+                if (n != msgs) {
+                    if (System.currentTimeMillis() - lastResumeAt < 1500) {
+                        // 刚从详情页返回：先只更新缓存，下一轮再赋值，不与返回后的首次交互抢主线程
+                        msgListCache[folder] = n
+                    } else applyList(n)
+                }
+            }
         }
     }
     // 供删除/标已读等操作后局部刷新列表(保持当前浏览位置，不强行回顶)
     val reload = { scope.launch { applyList(loadList()) }; Unit }
+    // 从详情页返回(ON_RESUME)的时刻：记录下来供轮询防抖用，返回后 1.5 秒内不立即重建列表，
+    // 避免“返回后第一下点击/滑动没反应”
+    val life = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(life, folder) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                lastResumeAt = System.currentTimeMillis()
+            }
+        }
+        life.lifecycle.addObserver(obs)
+        onDispose { life.lifecycle.removeObserver(obs) }
+    }
 
     // 联系人备注整表一次查询(不再每行各查一次库)：返回列表重建时多行同时发查询会导致
     // 多次重组集中爆发，正是“返回后第一下滑动没反应”的推手之一
@@ -665,6 +714,15 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
                     }) { Text("清空") }
                 },
                 dismissButton = { TextButton(onClick = { showClearTrash = false }) { Text("取消") } })
+        }
+        // 一键回到顶部：列表不在最顶部就显示(不管是因为滚动还是刚来了新邮件)；
+        // 点一下平滑滚回顶部。第 0 项永远是最新邮件(默认最新优先排序)，
+        // 回顶时即使刚来了新邮件，也回到的是新邮件所在的新顶部
+        if (listState.canScrollBackward) {
+            SmallFloatingActionButton(
+                onClick = { scope.launch { runCatching { listState.animateScrollToItem(0) } } },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = 96.dp)
+            ) { Icon(Icons.Default.KeyboardArrowUp, "回到顶部") }
         }
     }
 }
