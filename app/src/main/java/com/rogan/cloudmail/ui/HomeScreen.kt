@@ -532,6 +532,11 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
     }
     LaunchedEffect(folder, sortMode, sortNonce, scrollNonce) {
         runCatching { loadList() }.getOrNull()?.let { applyList(it) }
+        // 等一帧让新列表先上屏再回顶：之前 scrollToItem 和新数据重组赛跑，
+        // 偶发“点了排序但没回到顶部”；再补一次延迟回顶双保险
+        androidx.compose.runtime.withFrameNanos { }
+        runCatching { listState.scrollToItem(0) }
+        kotlinx.coroutines.delay(100)
         runCatching { listState.scrollToItem(0) }
     }
     // 实时轮询数据库(每 0.8 秒，IO 线程，纯本地查询开销极小)：同步入库/已读状态变化后，
