@@ -159,9 +159,36 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
         }
     }
 
-    // 系统返回键：侧边栏打开时先关闭侧边栏；在文件夹(星标/未读/已发送/草稿/回收站等)时先回“全部邮件”，而不是直接退出APP
-    BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
+    // 系统返回键逻辑：
+    // 1) 侧边栏打开 → 关闭侧边栏(若刚才是“全部邮件页按返回打开的侧边栏”且间隔很短，视为要退出 APP)
+    // 2) 在分类(星标/未读/已发送/草稿/回收站/账号/标签)里 → 先回「全部邮件」
+    // 3) 在「全部邮件」且侧边栏关闭 → 打开侧边栏方便去其他文件夹，并提示“再按一次退出”；
+    //    2 秒内再按一次才真正退出 APP(不会误触直接退出)
+    var lastBackAt by remember { mutableStateOf(0L) }
+    fun currentActivity(): android.app.Activity? {
+        var c: android.content.Context = ctx
+        while (c is android.content.ContextWrapper) {
+            if (c is android.app.Activity) return c
+            c = c.baseContext
+        }
+        return null
+    }
+    BackHandler(enabled = drawer.isOpen) {
+        val exitNow = folder == "all" && System.currentTimeMillis() - lastBackAt < 2000
+        scope.launch { drawer.close() }
+        if (exitNow) currentActivity()?.finishAffinity()
+    }
     BackHandler(enabled = !drawer.isOpen && folder != "all") { folder = "all"; reloadKey++; scrollNonce++ }
+    BackHandler(enabled = !drawer.isOpen && folder == "all") {
+        val now = System.currentTimeMillis()
+        if (now - lastBackAt < 2000) {
+            currentActivity()?.finishAffinity()
+        } else {
+            lastBackAt = now
+            syncMsg = "再按一次返回键退出云邮；可从侧边栏进入其他文件夹"
+            scope.launch { drawer.open() }
+        }
+    }
 
     // 真实立即同步：必须在 IO 线程执行 IMAP 网络请求(主线程会被系统拦截导致“刷新没反应”)
     // showBar=只有手动点刷新按钮才显示顶部进度条；后台自动同步静默进行，不打扰浏览
