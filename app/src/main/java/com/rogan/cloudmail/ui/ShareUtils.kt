@@ -169,7 +169,7 @@ object ShareUtils {
             }
             val isImg = mime2.startsWith("image/")
             val isVid = mime2.startsWith("video/")
-            val uri = if (isImg) {
+            val uri: android.net.Uri = (if (isImg) {
                 values.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CloudMail")
                 resolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             } else if (isVid) {
@@ -178,7 +178,7 @@ object ShareUtils {
             } else {
                 values.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/CloudMail")
                 resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            } ?: throw IllegalStateException("无法创建保存条目")
+            }) ?: throw IllegalStateException("无法创建保存条目")
             val os = resolver.openOutputStream(uri) ?: throw IllegalStateException("无法写入文件")
             os.use { outs -> f.inputStream().use { ins -> ins.copyTo(outs) } }
             values.clear()
@@ -202,7 +202,7 @@ object ShareUtils {
     }.getOrElse {
         val dir = File(ctx.getExternalFilesDir(null), "Download").apply { mkdirs() }
         val out = File(dir, f.name)
-        runCatching { f.inputStream().use { ins -> out.outputStream().use { outs -> ins.copyTo(it) } } }
+        runCatching { f.inputStream().use { ins -> out.outputStream().use { outs -> ins.copyTo(outs) } } }
         if (out.exists() && out.length() > 0) "已保存到应用文件夹(文件管理器→Android/data/com.rogan.cloudmail/files/Download)：${f.name}"
         else "保存失败：${it.message ?: "未知错误"}，请重试"
     }
