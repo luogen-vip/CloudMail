@@ -115,38 +115,42 @@ fun SettingsScreen(nav: NavHostController) {
 
 /* ============ 全局搜索(输入即实时显示结果) ============ */
 
+// 搜索状态全局持有：点进邮件再返回不清空，无需重新搜索
+object SearchState {
+    var q by mutableStateOf("")
+    var msgs by mutableStateOf<List<MailMessage>>(emptyList())
+    var contacts by mutableStateOf<List<Contact>>(emptyList())
+    var searched by mutableStateOf(false)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SearchScreen(nav: NavHostController) {
     val ctx = LocalContext.current
     val db = AppDatabase.get(ctx)
     val scope = rememberCoroutineScope()
-    var q by remember { mutableStateOf("") }
-    var msgs by remember { mutableStateOf<List<MailMessage>>(emptyList()) }
-    var contacts by remember { mutableStateOf<List<Contact>>(emptyList()) }
-    var searched by remember { mutableStateOf(false) }
 
-    // 实时搜索：输入变化后 300ms 自动搜索，无需手动点击
-    LaunchedEffect(q) {
-        val kw = q.trim()
-        if (kw.isBlank()) { msgs = emptyList(); contacts = emptyList(); searched = false; return@LaunchedEffect }
+    // 实时搜索：输入变化后 300ms 自动搜索，无需手动点击；状态存在 SearchState（全局），点进邮件返回不清空
+    LaunchedEffect(SearchState.q) {
+        val kw = SearchState.q.trim()
+        if (kw.isBlank()) { SearchState.msgs = emptyList(); SearchState.contacts = emptyList(); SearchState.searched = false; return@LaunchedEffect }
         kotlinx.coroutines.delay(300)
-        msgs = db.messages().search(kw)
-        contacts = db.contacts().search(kw)
-        searched = true
+        SearchState.msgs = db.messages().search(kw)
+        SearchState.contacts = db.contacts().search(kw)
+        SearchState.searched = true
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("搜索", fontSize = 18.sp) },
-                navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } }
+                navigationIcon = { IconButton(onClick = { SearchState.q = ""; SearchState.searched = false; nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } }
             )
         }
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
             // 搜索框：圆润胶囊造型，高度固定不遮挡文字
-            TextField(value = q, onValueChange = { q = it },
+            TextField(value = SearchState.q, onValueChange = { SearchState.q = it },
                 placeholder = { Text("输入即实时搜索：邮件主题/内容/联系人…", fontSize = 14.sp) },
                 singleLine = true,
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(26.dp),
@@ -157,13 +161,13 @@ fun SearchScreen(nav: NavHostController) {
                     unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp).height(56.dp),
                 trailingIcon = {
-                    if (q.isNotBlank()) IconButton(onClick = { q = "" }) { Icon(Icons.Default.Close, "清空") }
+                    if (SearchState.q.isNotBlank()) IconButton(onClick = { SearchState.q = "" }) { Icon(Icons.Default.Close, "清空") }
                 })
             LazyColumn(Modifier.fillMaxSize()) {
-                if (contacts.isNotEmpty()) {
-                    item { Text("联系人 (${contacts.size})", fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                if (SearchState.contacts.isNotEmpty()) {
+                    item { Text("联系人 (${SearchState.contacts.size})", fontSize = 14.sp, fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(16.dp)) }
-                    items(contacts, key = { "c${it.id}" }) { c ->
+                    items(SearchState.contacts, key = { "c${it.id}" }) { c ->
                         ListItem(
                             headlineContent = { Text(c.remark.ifBlank { c.email }) },
                             supportingContent = { Text(c.email) },
@@ -174,10 +178,10 @@ fun SearchScreen(nav: NavHostController) {
                     }
                     item { HorizontalDivider() }
                 }
-                if (msgs.isNotEmpty()) {
-                    item { Text("邮件 (${msgs.size})", fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                if (SearchState.msgs.isNotEmpty()) {
+                    item { Text("邮件 (${SearchState.msgs.size})", fontSize = 14.sp, fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(16.dp)) }
-                    items(msgs, key = { "m${it.id}" }) { m ->
+                    items(SearchState.msgs, key = { "m${it.id}" }) { m ->
                         ListItem(
                             headlineContent = { Text(m.subject.ifBlank { "(无主题)" }) },
                             supportingContent = { Text("${if (m.folder == "SENT") "发送至 " else m.fromAddr} · ${fmtTime(m.date)}") },
@@ -189,7 +193,7 @@ fun SearchScreen(nav: NavHostController) {
                         )
                     }
                 }
-                if (searched && msgs.isEmpty() && contacts.isEmpty()) {
+                if (SearchState.searched && SearchState.msgs.isEmpty() && SearchState.contacts.isEmpty()) {
                     item {
                         Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
                             Text("没有匹配的结果", color = MaterialTheme.colorScheme.onSurfaceVariant)
