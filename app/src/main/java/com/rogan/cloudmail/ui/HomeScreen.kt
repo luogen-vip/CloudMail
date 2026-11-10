@@ -599,10 +599,25 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             runCatching {
                 val n = loadList()
                 if (n != msgs) {
-                    if (System.currentTimeMillis() - lastResumeAt < 1500) {
+                    // 真有新邮件到达(顶部出现了之前不存在的邮件 id)：立即上屏+回顶，
+                    // 不管是否刚从详情页返回。用户看到“有一封新邮件”提示后，
+                    // 全部邮件顶部就要立刻出现这封信，不再需要点通知/切未读文件夹才能触发
+                    val newTop = n.firstOrNull()?.id
+                    val arrived = newTop != null && msgs.isNotEmpty() &&
+                        newTop != msgs.first().id && msgs.none { it.id == newTop }
+                    if (System.currentTimeMillis() - lastResumeAt < 1500 && !arrived) {
                         // 刚从详情页返回：先只更新缓存，下一轮再赋值，不与返回后的首次交互抢主线程
                         msgListCache[folder] = n
-                    } else applyList(n)
+                    } else {
+                        applyList(n)
+                        if (arrived && folder != "sent" && folder != "trash" && folder != "outbox") {
+                            // 有新邮件：立即回到列表顶部，让最新邮件直接出现在眼前
+                            androidx.compose.runtime.withFrameNanos { }
+                            runCatching { listState.scrollToItem(0) }
+                            kotlinx.coroutines.delay(100)
+                            runCatching { listState.scrollToItem(0) }
+                        }
+                    }
                 }
             }
         }
