@@ -52,7 +52,9 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 fromName = acc.nickname.ifBlank { acc.email },
                 toAddr = item.toAddr, ccAddr = item.ccAddr,
                 date = System.currentTimeMillis(),
-                bodyHtml = item.bodyHtml + cardHtml,
+                // 名片段用 <!--VCARD--> 标记包起来：再次编辑/转发时能整块还原成名片(含头像图片和样式)，
+                // HTML 注释对收件人不可见，不影响任何邮箱的显示效果
+                bodyHtml = item.bodyHtml + (if (cardHtml.isNotBlank()) "<!--VCARD-->$cardHtml<!--/VCARD-->" else ""),
                 snippet = item.subject, isRead = true, isStarred = false, isAd = false,
                 hasAttachments = atts.isNotEmpty(),
                 attachmentsJson = atts.joinToString(",", "[", "]") { it.toJson() }, loaded = true
