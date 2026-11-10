@@ -200,7 +200,7 @@ fun SearchScreen(nav: NavHostController) {
                         }
                     }
                 }
-                if (!searched) {
+                if (!SearchState.searched) {
                     item {
                         Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
                             Text("输入内容即可实时显示相关邮件与联系人", color = MaterialTheme.colorScheme.onSurfaceVariant)
