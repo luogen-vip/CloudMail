@@ -48,8 +48,11 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             }
             val text = buildString {
                 if (bounce) {
-                    append("您之前发送的邮件被退回，对方地址可能不存在/已满/被拒收")
-                    if (m.subject.isNotBlank()) append("。").append(m.subject.take(50))
+                    // 退信给出具体失败原因：域名不存在/地址不存在/已满/被拒收等，从退信正文解析
+                    append("邮件未送达：")
+                    append(com.rogan.cloudmail.ui.bounceReason(m.snippet + " " + m.bodyHtml.take(4000)))
+                    val fa = com.rogan.cloudmail.ui.bounceFailedAddr(m.snippet + " " + m.bodyHtml.take(4000))
+                    if (fa != null && fa != m.fromAddr) append("\n失败地址：$fa")
                 } else {
                     append(m.subject.ifBlank { "(无主题)" })
                     if (m.snippet.isNotBlank() && m.snippet != m.subject) append("\n").append(m.snippet.take(80))
