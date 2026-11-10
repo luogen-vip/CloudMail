@@ -95,7 +95,9 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             }
                         }) { Icon(Icons.Default.PushPin, if (m.pinnedAt > 0) "取消置顶" else "置顶",
                             tint = if (m.pinnedAt > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
-                        IconButton(onClick = { showShare = true }) { Icon(Icons.Default.Share, "分享/导出") }
+                        if (m.folder != "SENT") {
+                            IconButton(onClick = { showShare = true }) { Icon(Icons.Default.Share, "分享/导出") }
+                        }
                         IconButton(onClick = {
                             if (starBusy) return@IconButton
                             starBusy = true
@@ -114,10 +116,12 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                 nav.navigate("composeTo/$to")
                             }
                         }) { Icon(Icons.Default.Reply, "回复") }
-                        IconButton(onClick = { nav.navigate("forward/${m.id}") }) { Icon(Icons.Default.Shortcut, "转发") }
+                        if (m.folder != "SENT") {
+                            IconButton(onClick = { nav.navigate("forward/${m.id}") }) { Icon(Icons.Default.Shortcut, "转发") }
+                        }
                         if (m.folder == "SENT") {
-                            // 已发送邮件动作多，收进「⋮」菜单：之前直接平铺 8 个图标，
-                            // 顶栏被挤压(置顶图标变形、返回箭头看起来消失)
+                            // 已发送邮件顶栏动作多(8 个图标)，之前置顶图标被挤变形、返回箭头被挡；
+                            // 现在顶栏只保留 置顶/分享/星标/回复/删除/⋮，转发收进 ⋮ 菜单，图标不再被挤压
                             var sentMenu by remember { mutableStateOf(false) }
                             IconButton(onClick = { sentMenu = true }) { Icon(Icons.Default.MoreVert, "更多操作") }
                             androidx.compose.material3.DropdownMenu(expanded = sentMenu,
@@ -126,6 +130,10 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                     onClick = { sentMenu = false; nav.navigate("reedit/${m.id}") })
                                 androidx.compose.material3.DropdownMenuItem(text = { Text("↩ 撤回") },
                                     onClick = { sentMenu = false; confirmRecall = true })
+                                androidx.compose.material3.DropdownMenuItem(text = { Text("➦ 转发") },
+                                    onClick = { sentMenu = false; nav.navigate("forward/${m.id}") })
+                                androidx.compose.material3.DropdownMenuItem(text = { Text("⤴ 分享/导出") },
+                                    onClick = { sentMenu = false; showShare = true })
                             }
                         }
                         IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Default.Delete, "删除") }
@@ -249,7 +257,6 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
             // 只有确实加载完且正文为空才显示“无正文内容”
             val html = remember(m.id, m.bodyHtml, m.loaded) { htmlForWebView(m) }
             // WebView 常驻不拆装：之前“加载中/失败/正文”三个分支互切会整体销毁重建视图，
-            // 正文加载完成那一瞬间整个页面(包括顶部收件人区)闪白一下；现在始终挂载，
             // 只用透明度和覆盖层控制显示，消除闪白
             Box(Modifier.fillMaxWidth().weight(1f)) {
                 androidx.compose.ui.viewinterop.AndroidView(
@@ -298,7 +305,9 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                     }
                 },
                 update = { wv ->
-                    wv.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
+                    // baseUrl 指到 assets：正文里的 @font-face 才能加载 APP 内置字体(衬线/楷体)，
+                    // 字体效果和发送时编辑区看到的完全一致
+                    wv.loadDataWithBaseURL("file:///android_asset/", html, "text/html", "utf-8", null)
                     wv.alpha = if (loading || !m.loaded) 0f else 1f
                 },
                 modifier = Modifier.fillMaxSize())
@@ -509,9 +518,14 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                 } })
         }
         // 稍后提醒：选一个时间，到点系统通知把这封邮件再提醒一遍(点击直达邮件)。
-        // 显示当前是否已有提醒；有提醒可一键取消(到点不再通知)，之后随时可重新设置
+        // 快捷 10/30 分钟 + 自定义年月日时分(想提多久都行)；已有提醒可一键取消后再重新设
         if (showRemind) {
-            var customMin by remember { mutableStateOf(TextFieldValue("30")) }
+            val cal0 = java.util.Calendar.getInstance()
+            var ry by remember { mutableStateOf(cal0.get(java.util.Calendar.YEAR)) }
+            var rmo by remember { mutableStateOf(cal0.get(java.util.Calendar.MONTH) + 1) }
+            var rdy by remember { mutableStateOf(cal0.get(java.util.Calendar.DAY_OF_MONTH)) }
+            var rh by remember { mutableStateOf(cal0.get(java.util.Calendar.HOUR_OF_DAY)) }
+            var rmi by remember { mutableStateOf(cal0.get(java.util.Calendar.MINUTE)) }
             // 查询这封邮件是否已有进行中的提醒(WorkManager 唯一任务 reminder_<id>)
             var hasReminder by remember(m.id) { mutableStateOf(false) }
             LaunchedEffect(m.id) {
@@ -521,10 +535,18 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                     hasReminder = wis.any { !it.state.isFinished }
                 }
             }
+            val target: Long = run {
+                val c = java.util.Calendar.getInstance()
+                c.set(ry, rmo - 1, rdy, rh, rmi, 0)
+                c.set(java.util.Calendar.MILLISECOND, 0)
+                c.timeInMillis
+            }
+            val maxD = when (rmo) { 1, 3, 5, 7, 8, 10, 12 -> 31; 4, 6, 9, 11 -> 30; else -> 29 }
+            val dateBad = rdy > maxD
             AlertDialog(onDismissRequest = { showRemind = false },
                 title = { Text("稍后提醒") },
                 text = {
-                    Column {
+                    Column(Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState())) {
                         Text("到点后 APP 会发一条提醒通知，点开就是这封邮件(即使 APP 已关闭后台也生效)。",
                             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.height(6.dp))
@@ -536,46 +558,40 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         }
                         Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            listOf("10分钟" to 10L, "30分钟" to 30L, "1小时" to 60L).forEach { (name, min) ->
+                            listOf("10分钟" to 10L, "30分钟" to 30L).forEach { (name, min) ->
                                 OutlinedButton(onClick = {
                                     com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, System.currentTimeMillis() + min * 60_000)
                                     hasReminder = true
                                     toast = "已设置：${min}分钟后提醒这封邮件"
                                 }) { Text(name, fontSize = 12.sp) }
                             }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            OutlinedButton(onClick = {
-                                val c = java.util.Calendar.getInstance()
-                                c.add(java.util.Calendar.DAY_OF_YEAR, 1)
-                                c.set(java.util.Calendar.HOUR_OF_DAY, 9)
-                                c.set(java.util.Calendar.MINUTE, 0)
-                                c.set(java.util.Calendar.SECOND, 0)
-                                com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, c.timeInMillis)
-                                hasReminder = true
-                                toast = "已设置：明天早上9点提醒这封邮件"
-                            }) { Text("明早9点", fontSize = 12.sp) }
                             OutlinedButton(onClick = {
                                 com.rogan.cloudmail.mail.ReminderWorker.cancel(ctx, m.id)
                                 hasReminder = false
-                                toast = "已取消这封邮件的稍后提醒"
+                                toast = "已取消这封邮件的稍后提醒，之后可重新设定"
                             }) { Text("取消提醒", fontSize = 12.sp, color = Color(0xFFEF6C00)) }
                         }
                         Spacer(Modifier.height(6.dp))
-                        Text("自定义提醒：输入分钟数(如 45 = 45分钟后提醒)", fontSize = 11.sp,
+                        Text("自定义提醒时间(想提多久都可以，含年月日)：", fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            TextField(value = customMin, onValueChange = { customMin = it }, singleLine = true,
-                                modifier = Modifier.weight(1f),
-                                placeholder = { Text("分钟数，如 45(1小时=60)") })
-                            TextButton(onClick = {
-                                val n = customMin.text.trim().toLongOrNull()
-                                if (n == null || n <= 0) { toast = "请输入正整数分钟数"; return@TextButton }
-                                com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, System.currentTimeMillis() + n * 60_000)
-                                hasReminder = true
-                                toast = "已设置：${n}分钟后提醒这封邮件"
-                            }) { Text("设定") }
-                        }
+                        com.rogan.cloudmail.ui.Stepper("年份", ry, cal0.get(java.util.Calendar.YEAR), cal0.get(java.util.Calendar.YEAR) + 5) { ry = it }
+                        com.rogan.cloudmail.ui.Stepper("月份", rmo, 1, 12) { rmo = it }
+                        com.rogan.cloudmail.ui.Stepper("日期", rdy, 1, 31) { rdy = it }
+                        if (dateBad) Text("$rmo 月没有 $rdy 日，请修改", fontSize = 12.sp, color = Color(0xFFEF6C00))
+                        com.rogan.cloudmail.ui.Stepper("小时", rh, 0, 23) { rh = it }
+                        com.rogan.cloudmail.ui.Stepper("分钟", rmi, 0, 59) { rmi = it }
+                        Text("将提醒：${fmtFull(target)}", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        TextButton(onClick = {
+                            when {
+                                dateBad -> toast = "$rmo 月没有 $rdy 日，请修改日期"
+                                target <= System.currentTimeMillis() -> toast = "所选时间已经过去了，请往后调"
+                                else -> {
+                                    com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, target)
+                                    hasReminder = true
+                                    toast = "已设置：${fmtFull(target)} 提醒这封邮件"
+                                }
+                            }
+                        }) { Text("按这个时间提醒") }
                     }
                 },
                 confirmButton = { TextButton(onClick = { showRemind = false }) { Text("关闭") } })
@@ -696,6 +712,7 @@ private fun htmlForWebView(m: MailMessage): String {
     return """
     <html><head><meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    ${fontFaceCss()}
     <style>body{font-family:sans-serif;padding:12px;color:#222;word-break:break-word}
     img{max-width:100%;height:auto;border-radius:6px}
     a{color:#1565C0}</style></head><body>$html</body></html>
