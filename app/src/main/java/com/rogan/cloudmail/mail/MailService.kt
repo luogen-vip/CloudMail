@@ -422,32 +422,57 @@ object MailService {
     suspend fun loadFull(ctx: Context, acc: Account, msg: MailMessage, db: AppDatabase): MailMessage {
         if (msg.loaded) return msg
         return mutexFor(acc.email).withLock {
-        val store = getStore(acc)
-        val f = if (msg.folder == "SENT") sentFolder(store) ?: return msg else store.getFolder("INBOX")
-        if (!f.exists()) return msg
-        f.open(Folder.READ_ONLY)
-        val uidFolder = f as UIDFolder
-        val m = uidFolder.getMessageByUID(msg.uid.toLong()) ?: return msg
-        val atts = mutableListOf<AttInfo>()
-        val body = extractBody(ctx, m, msg.id, atts)
-        val updated = msg.copy(
-            bodyHtml = body,
-            snippet = android.text.Html.fromHtml(
-                body.replace(Regex("<br\\s*/?>"), "\n").replace(Regex("<[^>]+>"), ""),
-                android.text.Html.FROM_HTML_MODE_LEGACY
-            ).toString().take(120),
-            hasAttachments = atts.isNotEmpty(),
-            attachmentsJson = org.json.JSONArray().apply { atts.forEach { put(org.json.JSONObject(it.toJson())) } }.toString(),
-            loaded = true
-        )
-        db.messages().update(updated)
-        f.close(false)
-        // 真实已读回执(MDN)：对方要求回执且这是收件时,回执一次
-        runCatching {
-            val rrt = m.getHeader("Disposition-Notification-To")?.firstOrNull()
-            if (!rrt.isNullOrBlank()) sendMdn(ctx, acc, msg, rrt)
+        var lastE: Exception? = null
+        var result: MailMessage? = null
+        var attempt = 0
+        // 最多 3 次尝试：连接可能"看着还在、其实已被服务器断开"(半死连接)，第一次失败后
+        // 必须彻底丢弃旧连接重建再试，否则点重新加载用的还是同一条死连接，必然再失败；
+        // 退出重进页面时恰好缓存失效新建了连接才"看起来正常"
+        while (attempt < 3 && result == null) {
+            if (attempt > 0) {
+                invalidateStore(acc.email)
+                kotlinx.coroutines.delay(400L * attempt)
+            }
+            attempt++
+            var opened: javax.mail.Folder? = null
+            try {
+                val store = getStore(acc)
+                val f = if (msg.folder == "SENT") sentFolder(store) ?: return msg else store.getFolder("INBOX")
+                if (!f.exists()) return msg
+                f.open(Folder.READ_ONLY)
+                opened = f
+                val uidFolder = f as UIDFolder
+                val m = uidFolder.getMessageByUID(msg.uid.toLong()) ?: return msg
+                val atts = mutableListOf<AttInfo>()
+                val body = extractBody(ctx, m, msg.id, atts)
+                val updated = msg.copy(
+                    bodyHtml = body,
+                    snippet = android.text.Html.fromHtml(
+                        body.replace(Regex("<br\\s*/?>"), "\n").replace(Regex("<[^>]+>"), ""),
+                        android.text.Html.FROM_HTML_MODE_LEGACY
+                    ).toString().take(120),
+                    hasAttachments = atts.isNotEmpty(),
+                    attachmentsJson = org.json.JSONArray().apply { atts.forEach { put(org.json.JSONObject(it.toJson())) } }.toString(),
+                    loaded = true
+                )
+                db.messages().update(updated)
+                f.close(false)
+                opened = null
+                result = updated
+                // 真实已读回执(MDN)：对方要求回执且这是收件时,回执一次
+                runCatching {
+                    val rrt = m.getHeader("Disposition-Notification-To")?.firstOrNull()
+                    if (!rrt.isNullOrBlank()) sendMdn(ctx, acc, msg, rrt)
+                }
+            } catch (e: Exception) {
+                runCatching { opened?.close(false) }
+                lastE = e
+                // 失败即彻底丢弃该账号缓存连接，下次尝试走全新连接
+                invalidateStore(acc.email)
+                if (!isTransient(e)) throw e
+            }
         }
-        updated
+        result ?: msg
         }
     }
 
