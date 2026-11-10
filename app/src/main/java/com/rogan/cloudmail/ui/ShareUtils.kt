@@ -189,8 +189,9 @@ object ShareUtils {
 
     /** 正文渲染成长图(清晰完整)：WebView 按内容高度渲染成一张 PNG(含主题/发件人头部)。
      *  必须把 WebView 临时挂到当前窗口(移到屏幕外，用户看不见)才能真实渲染：
-     *  之前不挂窗口直接 draw，很多机型画出来是空白，表现为“正在生成长图…然后没反应”；
-     *  并加了 15 秒超时，渲染失败时明确提示而不是永远卡住 */
+     *  之前不挂窗口直接 draw，很多机型画出来是空白；
+     *  高度测量改为轮询到稳定：之前只在 onPageFinished 量一次，正文里的图片/字体还在异步加载，
+     *  高度定格太小，长图只有上半部分；现在每 400ms 量一次内容高度，连续 3 次稳定才截图 */
     suspend fun exportLongImage(ctx: Context, m: MailMessage): File? = withContext(Dispatchers.Main) {
         val inlineAtts = AttInfo.fromJson(m.attachmentsJson).filter { it.isInline && it.cid.isNotBlank() }
         var html = m.bodyHtml.ifBlank { "<p style='color:#999'>(无正文内容)</p>" }
@@ -199,6 +200,7 @@ object ShareUtils {
         }
         val full = """
             <html><head><meta charset="utf-8"/>
+            ${fontFaceCss()}
             <style>body{font-family:sans-serif;padding:16px;color:#222;word-break:break-word;background:#ffffff}
             img{max-width:100%;height:auto;border-radius:6px} a{color:#1565C0}
             .hdr{border-bottom:1px solid #e0e0e0;padding-bottom:10px;margin-bottom:14px;color:#666;font-size:14px}</style></head>
@@ -223,9 +225,9 @@ object ShareUtils {
         out.takeIf { it.exists() && it.length() > 0 }
     }
 
-    /** 挂到窗口渲染(可靠方案) */
+    /** 挂到窗口渲染(可靠方案)：内容高度轮询到连续稳定后才截图，保证长邮件完整 */
     private suspend fun renderAttached(root: android.view.ViewGroup, full: String, widthPx: Int, out: File) {
-        kotlinx.coroutines.withTimeoutOrNull(15000) {
+        kotlinx.coroutines.withTimeoutOrNull(25000) {
             suspendCancellableCoroutine { cont ->
                 val wv = WebView(root.context)
                 wv.settings.javaScriptEnabled = false
@@ -236,59 +238,83 @@ object ShareUtils {
                 root.addView(wv, lp)
                 wv.webViewClient = object : android.webkit.WebViewClient() {
                     override fun onPageFinished(view: WebView, u: String) {
-                        view.post {
-                            // 量出真实内容高度，再完整画成一张图
-                            view.measure(
-                                android.view.View.MeasureSpec.makeMeasureSpec(widthPx, android.view.View.MeasureSpec.EXACTLY),
-                                android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED))
-                            val h = view.measuredHeight.coerceAtLeast(200)
-                            try {
-                                val bmp = Bitmap.createBitmap(widthPx, h, Bitmap.Config.ARGB_8888)
-                                val cvs = android.graphics.Canvas(bmp)
-                                cvs.drawColor(android.graphics.Color.WHITE)
-                                view.layout(0, 0, widthPx, h)
-                                view.draw(cvs)
-                                out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                                bmp.recycle()
-                            } catch (_: Throwable) { }
-                            root.removeView(wv)
-                            wv.destroy()
-                            if (cont.isActive) cont.resume(Unit)
+                        var lastH = -1
+                        var stable = 0
+                        var tries = 0
+                        fun tick() {
+                            tries++
+                            val h = (view.contentHeight * view.scale).toInt().coerceIn(200, 12000)
+                            if (h == lastH) stable++ else { stable = 0; lastH = h }
+                            if (stable >= 3 || tries > 55) {
+                                view.post {
+                                    val h2 = lastH.coerceAtLeast(200)
+                                    try {
+                                        val bmp = Bitmap.createBitmap(widthPx, h2, Bitmap.Config.ARGB_8888)
+                                        val cvs = android.graphics.Canvas(bmp)
+                                        cvs.drawColor(android.graphics.Color.WHITE)
+                                        view.measure(
+                                            android.view.View.MeasureSpec.makeMeasureSpec(widthPx, android.view.View.MeasureSpec.EXACTLY),
+                                            android.view.View.MeasureSpec.makeMeasureSpec(h2, android.view.View.MeasureSpec.EXACTLY))
+                                        view.layout(0, 0, widthPx, h2)
+                                        view.draw(cvs)
+                                        out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                                        bmp.recycle()
+                                    } catch (_: Throwable) { }
+                                    root.removeView(wv)
+                                    wv.destroy()
+                                    if (cont.isActive) cont.resume(Unit)
+                                }
+                            } else view.postDelayed({ tick() }, 400)
                         }
+                        view.postDelayed({ tick() }, 400)
                     }
                 }
-                wv.loadDataWithBaseURL(null, full, "text/html", "utf-8", null)
+                wv.loadDataWithBaseURL("file:///android_asset/", full, "text/html", "utf-8", null)
             }
         }
     }
 
     /** 拿不到窗口时的兜底渲染(老方式，部分机型仍可用) */
     private suspend fun renderOffscreen(ctx: Context, full: String, widthPx: Int, out: File) {
-        kotlinx.coroutines.withTimeoutOrNull(15000) {
+        kotlinx.coroutines.withTimeoutOrNull(25000) {
             suspendCancellableCoroutine { cont ->
                 val wv = WebView(ctx)
                 wv.settings.javaScriptEnabled = false
                 wv.settings.allowFileAccess = true
                 wv.webViewClient = object : android.webkit.WebViewClient() {
                     override fun onPageFinished(view: WebView, u: String) {
-                        view.post {
-                            val h = (view.contentHeight * view.scale).toInt().coerceAtLeast(200)
-                            try {
-                                val bmp = Bitmap.createBitmap(widthPx, h, Bitmap.Config.ARGB_8888)
-                                val cvs = android.graphics.Canvas(bmp)
-                                cvs.drawColor(android.graphics.Color.WHITE)
-                                view.layout(0, 0, widthPx, h)
-                                view.draw(cvs)
-                                out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                                bmp.recycle()
-                            } catch (_: Throwable) { }
-                            wv.destroy()
-                            if (cont.isActive) cont.resume(Unit)
+                        var lastH = -1
+                        var stable = 0
+                        var tries = 0
+                        fun tick() {
+                            tries++
+                            val h = (view.contentHeight * view.scale).toInt().coerceIn(200, 12000)
+                            if (h == lastH) stable++ else { stable = 0; lastH = h }
+                            if (stable >= 3 || tries > 55) {
+                                view.post {
+                                    val h2 = lastH.coerceAtLeast(200)
+                                    try {
+                                        val bmp = Bitmap.createBitmap(widthPx, h2, Bitmap.Config.ARGB_8888)
+                                        val cvs = android.graphics.Canvas(bmp)
+                                        cvs.drawColor(android.graphics.Color.WHITE)
+                                        view.measure(
+                                            android.view.View.MeasureSpec.makeMeasureSpec(widthPx, android.view.View.MeasureSpec.EXACTLY),
+                                            android.view.View.MeasureSpec.makeMeasureSpec(h2, android.view.View.MeasureSpec.EXACTLY))
+                                        view.layout(0, 0, widthPx, h2)
+                                        view.draw(cvs)
+                                        out.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                                        bmp.recycle()
+                                    } catch (_: Throwable) { }
+                                    wv.destroy()
+                                    if (cont.isActive) cont.resume(Unit)
+                                }
+                            } else view.postDelayed({ tick() }, 400)
                         }
+                        view.postDelayed({ tick() }, 400)
                     }
                 }
                 wv.layout(0, 0, widthPx, 400)
-                wv.loadDataWithBaseURL(null, full, "text/html", "utf-8", null)
+                wv.loadDataWithBaseURL("file:///android_asset/", full, "text/html", "utf-8", null)
             }
         }
     }
