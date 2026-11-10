@@ -10,7 +10,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 @Database(
     entities = [Account::class, MailMessage::class, Contact::class, OutboxItem::class,
                 Label::class, MailLabel::class],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -50,9 +50,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN pinnedAt INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun get(ctx: Context): AppDatabase = inst ?: synchronized(this) {
             inst ?: Room.databaseBuilder(ctx.applicationContext, AppDatabase::class.java, "cloudmail.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { inst = it }
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                // 加固：万一装了更高数据库版本的版本再装回低版本(降级)，默认会直接崩溃且每次打开都崩，
+                // 用户只能卸载重装导致邮件/标签全部丢失。改为降级时才重建数据库，其余正常升级路径不受影响
+                .fallbackToDestructiveMigrationOnDowngrade()
+                .build().also { inst = it }
         }
     }
 }
