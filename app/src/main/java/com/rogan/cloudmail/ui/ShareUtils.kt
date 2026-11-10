@@ -168,11 +168,22 @@ object ShareUtils {
                 put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime2)
                 put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val resolver = ctx.contentResolver
-            val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: throw IllegalStateException("无法创建下载条目")
-            val os = resolver.openOutputStream(uri) ?: throw IllegalStateException("无法写入下载文件")
-            os.use { out -> f.inputStream().use { it.copyTo(out) } }
+            // 按文件类型分门别类落到公共目录：图片进相册、视频进视频库、其它进「下载」，
+            // 这样保存完在图库/文件管理器里都能直接看到(不再"提示已保存但找不到")
+            val isImg = mime2.startsWith("image/")
+            val isVid = mime2.startsWith("video/")
+            val uri: android.net.Uri = (if (isImg) {
+                values.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CloudMail")
+                resolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            } else if (isVid) {
+                values.put(android.provider.MediaStore.Video.Media.RELATIVE_PATH, "Movies/CloudMail")
+                resolver.insert(android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            } else {
+                values.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/CloudMail")
+                resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            }) ?: throw IllegalStateException("无法创建保存条目")
+            val os = resolver.openOutputStream(uri) ?: throw IllegalStateException("无法写入文件")
+            os.use { outs -> f.inputStream().use { ins -> ins.copyTo(outs) } }
             values.clear()
             values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
