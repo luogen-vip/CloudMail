@@ -1102,19 +1102,21 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         if (showCardPreview && acc != null) {
             val cardHtml = remember(acc.id, acc.vcard, acc.avatarPath) {
                 SendWorker.cardBlock(acc).replace(
+                    // 头像用 Uri.fromFile 生成合法的 file:// URI(路径含空格/中文也能加载)，
+                    // 之前直接拼 "file://$it" 且 baseUrl 传 null，WebView 拦截了私有目录图片 → 预览头像破裂；
+                    // 发送邮件时头像走 cid 内联附件所以正常
                     "cid:${SendWorker.CARD_AVATAR_CID}",
-                    acc.avatarPath?.let { "file://$it" } ?: "noavatar")
+                    acc.avatarPath?.let { android.net.Uri.fromFile(java.io.File(it)).toString() } ?: "noavatar")
             }
             AlertDialog(onDismissRequest = { showCardPreview = false },
                 title = { Text("名片预览(收件人将看到的效果)") },
                 text = {
-                    AndroidView(factory = { vctx ->
-                        android.webkit.WebView(vctx).apply { settings.javaScriptEnabled = false }
-                    }, update = { wv ->
-                        wv.loadDataWithBaseURL(null,
-                            "<html><body style=\"font-family:sans-serif\">$cardHtml</body></html>",
-                            "text/html", "utf-8", null)
-                    }, modifier = Modifier.fillMaxWidth().height(220.dp))
+                    // 与卡片预览/正文共用同一预览组件：baseUrl 指向 assets + allowFileAccess，
+                    // file:// 头像图片能正常加载，不再破裂
+                    CardPreviewWebView(nav,
+                        "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'/>${fontFaceCss()}</head>" +
+                        "<body style=\"font-family:sans-serif\">$cardHtml</body></html>",
+                        220.dp, "file:///android_asset/")
                 },
                 confirmButton = { TextButton(onClick = { showCardPreview = false; nav.navigate("editAccount/${acc.id}") }) { Text("去编辑名片") } },
                 dismissButton = { TextButton(onClick = { showCardPreview = false }) { Text("关闭") } })
