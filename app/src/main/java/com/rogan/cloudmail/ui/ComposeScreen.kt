@@ -672,7 +672,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 }
             } else {
                 val overflow = info.offset + info.size + 60 - bodyListState.layoutInfo.viewportSize.height
-                if (overflow > 0) scrollScope.launch { runCatching { bodyListState.animateScrollBy(overflow.toFloat()) } }
+                if (overflow > 0) scrollScope.launch { runCatching { androidx.compose.foundation.gestures.animateScrollBy(bodyListState, overflow.toFloat()) } }
             }
         }
         LaunchedEffect(imeBottom, focusBlockId) {
