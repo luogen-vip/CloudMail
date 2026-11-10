@@ -88,7 +88,10 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
          */
         fun cardBlock(acc: Account): String {
             val v = VCard.fromJson(acc.vcard)
-            val name = v.name.ifBlank { acc.nickname }
+            // 姓名优先级：显示名称(昵称) > 名片姓名 > 邮箱前缀。
+            // 之前优先用名片姓名，而建号时名片姓名被写成了邮箱前缀且之后不再跟随显示名称更新，
+            // 导致用户改了「显示名称」后名片预览/发出的名片最上面还是邮箱地址
+            val name = acc.nickname.ifBlank { v.name.ifBlank { acc.email.substringBefore("@") } }
             val rows = buildList {
                 if (v.phone.isNotBlank()) add("电话：${v.phone}")
                 if (v.org.isNotBlank()) add("单位：${v.org}")
