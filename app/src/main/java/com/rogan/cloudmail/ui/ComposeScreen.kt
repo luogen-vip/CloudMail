@@ -755,14 +755,24 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     verticalArrangement = Arrangement.spacedBy(0.dp)) {
                     TextButton(onClick = { showCc = !showCc }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
                         Text(if (showCc) "隐藏抄送/密送" else "抄送/密送", fontSize = 13.sp) }
-                    Spacer(Modifier.width(10.dp))
-                    Text("已读回执", fontSize = 13.sp)
-                    Switch(checked = readReceipt, onCheckedChange = { readReceipt = it; userEdited = true })
-                    Spacer(Modifier.width(8.dp))
-                    Text("名片", fontSize = 13.sp)
-                    Switch(checked = cardMode, onCheckedChange = { cardMode = it })
-                    TextButton(onClick = { showCardPreview = true }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
-                        Text("名片预览", fontSize = 13.sp) }
+                    // 每个开关和它的文字捆在同一个 Row：FlowRow 换行时开关绝不会单独跑到另一行，
+                    // 之前「名片」开关被换到第二行、正好落在「名片预览」前面，被误当成预览的开关
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("已读回执", fontSize = 13.sp)
+                        Switch(checked = readReceipt, onCheckedChange = { readReceipt = it; userEdited = true })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("名片", fontSize = 13.sp)
+                        Switch(checked = cardMode, onCheckedChange = { cardMode = it })
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    // 名片预览做成蓝色加粗+眼睛图标的醒目按钮，和普通开关一眼区分开
+                    TextButton(onClick = { showCardPreview = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary)) {
+                        Icon(Icons.Default.Visibility, null, Modifier.size(15.dp))
+                        Text("名片预览", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
                 Text("名片内容在「设置→点击邮箱账号→名片(资料卡)信息」中编辑", fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp))
@@ -1164,6 +1174,12 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             fun linkHtmlNow(): String =
                 if (clt.text.isNotBlank() && clu.text.trim().startsWith("http"))
                     "<a href=\"${clu.text.trim()}\" style=\"color:${cardLinkColor(tpl)};text-decoration:underline\">${escXml(clt.text.trim())}</a>" else ""
+            // 弹窗预览用的整页 HTML(样式小预览/底部实时预览共用同一段，所见即对方所得)
+            fun cardPreviewPageHtml(): String =
+                "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'/>${fontFaceCss()}</head>" +
+                "<body style='margin:0;font-family:sans-serif'>" +
+                buildCardHtml(tpl, escXml(ct.text.trim()), escXml(cb.text.trim()).replace("\n", "<br/>"), linkHtmlNow()) +
+                "</body></html>"
             AlertDialog(onDismissRequest = { showCardTpl = false; editCard = null },
                 title = { Text(if (editing == null) "插入卡片" else "重新编辑卡片") },
                 text = {
@@ -1180,6 +1196,10 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                                     label = { Text(cardName(i), fontSize = 12.sp) })
                             }
                         }
+                        // 样式即时小预览：点哪个样式名，这里立刻显示该样式的真实长相(带当前填的标题/正文/链接)，
+                        // 不用再滑到底部才能看到；位置紧贴样式选择行，弹窗一打开就能看见
+                        Text("当前样式预览", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        CardPreviewWebView(nav, cardPreviewPageHtml(), 120.dp, "file:///android_asset/")
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             TextField(value = ct, onValueChange = { ct = it }, placeholder = { Text("卡片标题") },
                                 singleLine = true, textStyle = MaterialTheme.typography.bodySmall)
@@ -1194,28 +1214,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         }
                         // 实时预览：和真实发送的 HTML 完全同一段，所见即对方所得
                         Text("实时预览", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        AndroidView(factory = { vctx ->
-                            android.webkit.WebView(vctx).apply {
-                                settings.javaScriptEnabled = false
-                                settings.allowFileAccess = true
-                                setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                                // 预览里的链接默认用 APP 内置浏览器打开(可复制链接/再用系统浏览器打开)，
-                                // 之前直接跳系统浏览器，看邮件时突兀地切出去
-                                webViewClient = object : android.webkit.WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(view: android.webkit.WebView, u: String): Boolean {
-                                        return if (u.startsWith("http://") || u.startsWith("https://")) {
-                                            nav.navigate("browser/" + android.net.Uri.encode(u)); true
-                                        } else false
-                                    }
-                                }
-                            }
-                        }, update = { wv ->
-                            wv.loadDataWithBaseURL("file:///android_asset/",
-                                "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'/>${fontFaceCss()}</head>" +
-                                "<body style='margin:0;font-family:sans-serif'>" +
-                                buildCardHtml(tpl, escXml(ct.text.trim()), escXml(cb.text.trim()).replace("\n", "<br/>"), linkHtmlNow()) +
-                                "</body></html>", "text/html", "utf-8", null)
-                        }, modifier = Modifier.fillMaxWidth().height(170.dp))
+                        CardPreviewWebView(nav, cardPreviewPageHtml(), 170.dp, "file:///android_asset/")
                     }
                 },
                 confirmButton = {
@@ -1347,6 +1346,27 @@ fun sniffKind(path: String): String = runCatching {
         }
     }
 }.getOrDefault("")
+
+/** 卡片预览 WebView(名片弹窗/卡片弹窗共用)：加载整页 HTML，链接走 APP 内置浏览器 */
+@Composable
+fun CardPreviewWebView(nav: NavHostController, pageHtml: String, h: androidx.compose.ui.unit.Dp, baseUrl: String? = null) {
+    AndroidView(factory = { vctx ->
+        android.webkit.WebView(vctx).apply {
+            settings.javaScriptEnabled = false
+            settings.allowFileAccess = true
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            webViewClient = object : android.webkit.WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: android.webkit.WebView, u: String): Boolean {
+                    return if (u.startsWith("http://") || u.startsWith("https://")) {
+                        nav.navigate("browser/" + android.net.Uri.encode(u)); true
+                    } else false
+                }
+            }
+        }
+    }, update = { wv ->
+        wv.loadDataWithBaseURL(baseUrl, pageHtml, "text/html", "utf-8", null)
+    }, modifier = Modifier.fillMaxWidth().height(h))
+}
 
 fun fontLabel(f: String) = when (f) {
     // 按钮上直接显示所选字体的真实名字(不带头缀/括号)：默认时显示「默认字体」，
