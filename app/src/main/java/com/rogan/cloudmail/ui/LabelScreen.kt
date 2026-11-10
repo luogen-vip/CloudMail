@@ -154,12 +154,8 @@ fun LabelsScreen(nav: NavHostController) {
                             Text("${counts[lb.id] ?: 0} 封邮件 · 点击查看", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         if (!selectionMode) {
-                            // 点标签：回到主页并打开该标签的邮件列表
-                            TextButton(onClick = {
-                                FolderBridge.pendingFolder = "label:${lb.id}"
-                                nav.popBackStack()
-                            }) { Text("打开", fontSize = 12.sp) }
                             // 删除单个标签：确认后删除(邮件保留，仅解除关联)
+                            // 点标签行本身即可打开该标签的邮件列表(不用再放一个「打开」按钮)
                             TextButton(onClick = { selected = setOf(lb.id); confirmDelete = true }) { Text("删除", fontSize = 12.sp, color = Color(0xFFD32F2F)) }
                         }
                     }
