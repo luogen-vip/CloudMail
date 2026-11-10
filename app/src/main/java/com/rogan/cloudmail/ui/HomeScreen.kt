@@ -167,7 +167,9 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
             folder = f
             reloadKey++
             scrollNonce++
-            runCatching { drawer.close() }
+            // snapTo 直接跳到关闭态(不带动画)：之前用 close() 动画从标签管理页回来时
+            // 会被导航恢复过程打断，抽屉停在展开状态挡住列表(看起来“点了标签弹出的是侧边栏”)
+            runCatching { drawer.snapTo(androidx.compose.material3.DrawerValue.Closed) }
         }
     }
 
@@ -322,7 +324,13 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                     refresh()
                 }
                 // 从标签管理页点了某个标签回来：切到该标签的邮件列表，并收起侧边栏
-                FolderBridge.consume()?.let { folder = it; reloadKey++; scope.launch { drawer.close() } }
+                // (snapTo 直接关闭不带动画，不会被恢复过程打断；下一帧再兜底一次)
+                FolderBridge.consume()?.let { folder = it; reloadKey++
+                    scope.launch {
+                        runCatching { drawer.snapTo(androidx.compose.material3.DrawerValue.Closed) }
+                        kotlinx.coroutines.delay(120)
+                        runCatching { drawer.snapTo(androidx.compose.material3.DrawerValue.Closed) }
+                    } }
             }
         }
         life.lifecycle.addObserver(obs)
@@ -541,8 +549,12 @@ fun MessageList(nav: NavHostController, folder: String, refreshParent: () -> Uni
             3 -> dedup.sortedBy { it.size }
             else -> dedup.sortedByDescending { it.date }
         }.let { base ->
-            // 置顶邮件永远在最上面；多封置顶按置顶时间倒序依次排列(后置顶的更靠上)
-            base.sortedWith(compareByDescending<MailMessage> { it.pinnedAt > 0 }.thenByDescending { it.pinnedAt })
+            // 置顶邮件只在默认「最新优先」下强制排最前(后置顶的更靠上)。
+            // 之前所有排序都置顶优先，「最早优先」下最新一封刚好被置顶时永远压在最上面，
+            // 看起来像排序没生效；现在其他排序严格按所选规则排列
+            if (sortMode == 0)
+                base.sortedWith(compareByDescending<MailMessage> { it.pinnedAt > 0 }.thenByDescending { it.pinnedAt })
+            else base
         }
     }
     // 关键修复：加载数据和回顶放在同一个协程里顺序执行。
