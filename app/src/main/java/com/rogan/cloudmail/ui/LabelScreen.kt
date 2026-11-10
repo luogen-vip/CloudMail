@@ -88,13 +88,7 @@ fun LabelsScreen(nav: NavHostController) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextField(value = newName, onValueChange = { newName = it },
                     placeholder = { Text("输入标签名，如：工作") },
-                    modifier = Modifier.weight(1f), singleLine = true,
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent))
+                    modifier = Modifier.weight(1f), singleLine = true)
                 Spacer(Modifier.width(8.dp))
                 Button(onClick = {
                     val n = newName.trim()
@@ -134,14 +128,7 @@ fun LabelsScreen(nav: NavHostController) {
                         Modifier.fillMaxWidth()
                             .background(if (isSel) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
                             .combinedClickable(
-                                onClick = {
-                                    if (selectionMode) toggleSelect(lb.id, !isSel)
-                                    else {
-                                        // 点标签直接打开该标签的邮件列表(回到主页并切换文件夹)
-                                        FolderBridge.pendingFolder = "label:${lb.id}"
-                                        nav.popBackStack()
-                                    }
-                                },
+                                onClick = { if (selectionMode) toggleSelect(lb.id, !isSel) },
                                 onLongClick = { selectionMode = true; selected = selected + lb.id }
                             )
                             .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -151,14 +138,9 @@ fun LabelsScreen(nav: NavHostController) {
                         Icon(Icons.Default.Label, null, tint = MaterialTheme.colorScheme.primary)
                         Column(Modifier.weight(1f).padding(start = 10.dp)) {
                             Text(lb.name, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                            Text("${counts[lb.id] ?: 0} 封邮件 · 点击查看", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("${counts[lb.id] ?: 0} 封邮件", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         if (!selectionMode) {
-                            // 点标签：回到主页并打开该标签的邮件列表
-                            TextButton(onClick = {
-                                FolderBridge.pendingFolder = "label:${lb.id}"
-                                nav.popBackStack()
-                            }) { Text("打开", fontSize = 12.sp) }
                             // 删除单个标签：确认后删除(邮件保留，仅解除关联)
                             TextButton(onClick = { selected = setOf(lb.id); confirmDelete = true }) { Text("删除", fontSize = 12.sp, color = Color(0xFFD32F2F)) }
                         }
