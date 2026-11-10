@@ -524,7 +524,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         if (sending) { toast = "正在发送中，请稍候…"; return }
         val rcpt = toRows.map { it.trim() }.filter { it.isNotBlank() }
         // 收件人为空：必须弹窗明确提示(不能只靠底部 Snackbar，键盘挡住用户根本看不见)
-        if (rcpt.isEmpty()) { alertMsg = "请填写收件人邮箱地址。\n可以手动输入，也可以点「从联系人选」添加联系人或从密送(BCC)指定接收人。"; return }
+        if (rcpt.isEmpty()) { alertMsg = "请填写收件人邮箱地址"; return }
         val bad = rcpt.filter { !emailRegex.matches(it) }
         if (bad.isNotEmpty()) { alertMsg = "这些不是有效的邮箱地址：${bad.joinToString("、")}，请检查后重试"; return }
         if (cc.text.isNotBlank()) {
@@ -635,8 +635,25 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 confirmButton = { TextButton(onClick = { stopRecording(true) }) { Text("保存") } },
                 dismissButton = { TextButton(onClick = { stopRecording(false) }) { Text("取消录音") } })
         }
-        // imePadding：弹出键盘时整个编辑区自动上移，键盘永远不挡住正在输入的正文光标处
-        LazyColumn(Modifier.padding(pad).fillMaxSize().imePadding().padding(horizontal = 14.dp)) {
+        // imePadding：弹出键盘时整个编辑区自动上移，键盘永远不挡住正在输入的正文光标处。
+        // 键盘弹出时再把正在输入的正文块滚进可视区：之前插入图片/卡片后正文被推到键盘下面，
+        // 继续打字看不见自己输了什么；现在键盘一弹出/切换输入块就自动滚到正在编辑的那一块
+        val bodyListState = androidx.compose.foundation.lazy.rememberLazyListState()
+        val imeBottom = androidx.compose.foundation.layout.WindowInsets.ime
+            .getBottom(androidx.compose.ui.platform.LocalDensity.current)
+        LaunchedEffect(imeBottom, focusBlockId) {
+            if (imeBottom > 0 && focusBlockId != null) {
+                val visible = bodyListState.layoutInfo.visibleItemsInfo.any { it.key == focusBlockId }
+                if (!visible) {
+                    val idx = blocks.indexOfFirst { it.id == focusBlockId }
+                    if (idx >= 0) {
+                        androidx.compose.runtime.withFrameNanos { }
+                        runCatching { bodyListState.animateScrollToItem(idx + 5) } // 前面 5 个固定区块(账号/收件人/抄送/主题/工具行)
+                    }
+                }
+            }
+        }
+        LazyColumn(state = bodyListState, modifier = Modifier.padding(pad).fillMaxSize().imePadding().padding(horizontal = 14.dp)) {
             // 发件账号选择
             item {
                 if (accounts.isEmpty()) {
@@ -720,7 +737,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             }
             item {
                 TextField(value = subject, onValueChange = { subject = it; userEdited = true },
-                    placeholder = { Text("主题") }, modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("主题") }, modifier = Modifier.fillMaxWidth().height(46.dp),
+                    textStyle = androidx.compose.material3.LocalTextStyle.current.copy(fontSize = 15.sp),
                     singleLine = true, colors = TextFieldDefaults.colors(
                         focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
                 HorizontalDivider()
@@ -958,7 +976,12 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
 
         // 附件/录音预览。录音/音频附件点击即直接播放(不再需要弹窗里再点一次「播放」)
         previewAtt?.let { a ->
-            val isAudio = a.mime.startsWith("audio/")
+            // 按真实内容识别文件类型(读文件头魔数)：有些文件没有后缀/系统没认出类型，
+            // 只凭 mime 会把图片当成“未知文件”弹“重新播放”；现在图片/视频/音频都能认出来
+            val sniffed = runCatching { sniffKind(a.path) }.getOrNull() ?: ""
+            val isImage = a.mime.startsWith("image/") || sniffed == "image"
+            val isVideo = a.mime.startsWith("video/") || sniffed == "video"
+            val isAudio = a.mime.startsWith("audio/") || sniffed == "audio"
             fun startPlay(p: AttInfo) {
                 runCatching {
                     player?.release()
@@ -978,13 +1001,15 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             }, title = { Text(a.name, fontSize = 15.sp) },
                 text = {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        if (a.mime.startsWith("image/")) {
+                        if (isImage) {
+                            // 图片(含没写后缀但实际是图片的文件)：直接预览这张图
                             AsyncImage(model = File(a.path), contentDescription = null,
                                 modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp), contentScale = ContentScale.Fit)
                         } else {
                             Text(when {
                                 isAudio && player != null -> "正在播放中…"
                                 isAudio -> "播放已结束，可点下方「重新播放」再听一次"
+                                isVideo -> "视频文件可点下方「用其他应用打开」播放"
                                 else -> "此类型暂不支持内嵌预览"
                             }, fontSize = 13.sp)
                         }
@@ -994,11 +1019,19 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = {
-                        if (player != null) {
-                            runCatching { player?.stop(); player?.release() }; player = null
-                        } else startPlay(a)
-                    }) { Text(if (player != null) "停止" else "重新播放") }
+                    // 播放按钮只给音频/视频(图片弹“重新播放”是错的)；其他类型给“用其他应用打开”
+                    when {
+                        isAudio -> TextButton(onClick = {
+                            if (player != null) {
+                                runCatching { player?.stop(); player?.release() }; player = null
+                            } else startPlay(a)
+                        }) { Text(if (player != null) "停止" else "重新播放") }
+                        else -> TextButton(onClick = {
+                            runCatching { ShareUtils.openFile(ctx, File(a.path), a.mime.ifBlank { "application/octet-stream" }) }
+                                .onFailure { toast = "打开失败：${it.message}" }
+                            previewAtt = null
+                        }) { Text("用其他应用打开") }
+                    }
                 },
                 dismissButton = { TextButton(onClick = {
                     runCatching { player?.stop(); player?.release() }; player = null; previewAtt = null
@@ -1086,7 +1119,9 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 text = {
                     // 样式选择和实时预览同屏：上面选样式/填内容(内容多时内部滚动)，预览固定在下方，不用来回滑动找。
                     // 整个弹窗限高，保证小屏手机上「插入/保存」按钮不会被挤出屏幕
-                    Column(Modifier.heightIn(max = 460.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(Modifier.heightIn(max = 460.dp)
+                        .verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         // 8 种样式分两行排开(不再横向滑动)，一眼能看全所有样式
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -1095,8 +1130,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                                     label = { Text(cardName(i), fontSize = 12.sp) })
                             }
                         }
-                        Column(Modifier.heightIn(max = 210.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             TextField(value = ct, onValueChange = { ct = it }, placeholder = { Text("卡片标题") },
                                 singleLine = true, textStyle = MaterialTheme.typography.bodySmall)
                             TextField(value = cb, onValueChange = { cb = it },
@@ -1109,7 +1143,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                                     singleLine = true, textStyle = MaterialTheme.typography.bodySmall)
                         }
                         // 实时预览：和真实发送的 HTML 完全同一段，所见即对方所得
-                        Text("实时预览(对方收到的样子)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("实时预览", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         AndroidView(factory = { vctx ->
                             android.webkit.WebView(vctx).apply {
                                 settings.javaScriptEnabled = false
@@ -1131,12 +1165,13 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                                 "<body style='margin:0;font-family:sans-serif'>" +
                                 buildCardHtml(tpl, escXml(ct.text.trim()), escXml(cb.text.trim()).replace("\n", "<br/>"), linkHtmlNow()) +
                                 "</body></html>", "text/html", "utf-8", null)
-                        }, modifier = Modifier.fillMaxWidth().height(150.dp))
+                        }, modifier = Modifier.fillMaxWidth().height(170.dp))
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = {
-                        if (ct.text.isBlank() && cb.text.isBlank()) { toast = "卡片标题和正文至少填一个"; return@TextButton }
+                        if (ct.text.isBlank() && cb.text.isBlank() && clt.text.isBlank()) {
+                            toast = "卡片还是空的：标题/正文/链接任意填一项就能插入"; return@TextButton }
                         val linkHtml = if (clt.text.isNotBlank() && clu.text.trim().startsWith("http"))
                             "<a href=\"${clu.text.trim()}\" style=\"color:${cardLinkColor(tpl)};text-decoration:underline\">${escXml(clt.text.trim())}</a>" else ""
                         val html = buildCardHtml(tpl, escXml(ct.text.trim()), escXml(cb.text.trim()).replace("\n", "<br/>"), linkHtml)
@@ -1195,8 +1230,6 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                         Stepper("分钟", mi, 0, 59) { mi = it }
                         if (!invalid && inPast) Text("所选时间早于当前时间，请重选(可选今天稍晚/明天/后天等)；不改时间直接点确定 = 立即发送",
                             fontSize = 12.sp, color = Color(0xFFEF6C00))
-                        Text("到点自动真实发送；APP 不打开(被清理后台)也会生效", fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 },
                 confirmButton = {
@@ -1243,9 +1276,32 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
 
 fun escXml(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+/** 读文件头魔数识别真实类型(有些附件没写后缀/系统认不出 mime)：返回 "image"/"video"/"audio"/""(认不出) */
+fun sniffKind(path: String): String = runCatching {
+    java.io.RandomAccessFile(path, "r").use { raf ->
+        val b = ByteArray(16); val n = raf.read(b)
+        if (n < 4) return@runCatching ""
+        fun at(off: Int, s: String) = n >= off + s.length && String(b, off, s.length, Charsets.US_ASCII) == s
+        when {
+            b[0] == 0xFF.toByte() && (b[1] == 0xD8.toByte()) -> "image"                    // JPEG
+            b[0] == 0x89.toByte() && b[1] == 0x50.toByte() -> "image"                      // PNG
+            b[0] == 'G'.code.toByte() && b[1] == 'I'.code.toByte() -> "image"              // GIF
+            b[0] == 'B'.code.toByte() && b[1] == 'M'.code.toByte() -> "image"              // BMP
+            String(b, 0, 4, Charsets.US_ASCII) == "RIFF" && at(8, "WEBP") -> "image"       // WebP
+            at(4, "ftyp") -> "video"                                                       // MP4/MOV 等容器
+            at(0, "ID3") || (b[0] == 0xFF.toByte() && (b[1].toInt() and 0xE0) == 0xE0) -> "audio" // MP3
+            String(b, 0, 4, Charsets.US_ASCII) == "RIFF" && at(8, "WAVE") -> "audio"       // WAV
+            String(b, 0, 4, Charsets.US_ASCII) == "OggS" -> "audio"                        // OGG
+            at(0, "flac") || (b[0] == 'f'.code.toByte() && b[1] == 'L'.code.toByte()) -> "audio"
+            else -> ""
+        }
+    }
+}.getOrDefault("")
+
 fun fontLabel(f: String) = when (f) {
-    "sans-serif" -> "字体·无衬线"; "serif" -> "字体·衬线(宋体风)"; "monospace" -> "字体·等宽"
-    "cursive" -> "字体·手写(楷体)"
+    // 短名(不带括号)：太长的名字在小屏上显示不完整反而看不出选了什么
+    "sans-serif" -> "字体·黑体"; "serif" -> "字体·宋体"; "monospace" -> "字体·等宽"
+    "cursive" -> "字体·楷体"
     else -> "字体·默认"
 }
 
