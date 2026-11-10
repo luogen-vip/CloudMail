@@ -95,10 +95,13 @@ object MailService {
         put("mail.imaps.host", acc.imapHost)
         put("mail.imaps.port", acc.imapPort.toString())
         put("mail.imaps.ssl.enable", "true")
-        put("mail.imaps.connectiontimeout", "20000")
-        put("mail.imaps.timeout", "30000")
-        // IDLE 心跳：30 秒一次保活探测，防止长连接静默断开
-        put("mail.imaps.heartbeatinterval", "30000")
+        put("mail.imaps.connectiontimeout", "15000")
+        put("mail.imaps.timeout", "25000")
+        // TCP 保活：让系统内核定期探测长连接，静默断网(切换基站/WiFi)时能尽快发现并重建，
+        // 不再出现"连接看着还在、其实早就死了"导致新邮件迟迟不到
+        put("mail.imaps.socket.keepalive", "true")
+        put("mail.imaps.usesocketchannels", "false")
+        put("mail.imaps.peek", "true")
         put("mail.mime.decodetext.strict", "false")
         if (acc.oauthToken.isNotBlank() || acc.oauthRefresh.isNotBlank())
             put("mail.imaps.auth.mechanisms", "XOAUTH2")
@@ -111,9 +114,13 @@ object MailService {
         put("mail.smtp.auth", "true")
         put("mail.smtp.ssl.enable", (acc.smtpPort == 465).toString())
         put("mail.smtp.starttls.enable", (acc.smtpPort == 587).toString())
-        put("mail.smtp.connectiontimeout", "20000")
-        put("mail.smtp.timeout", "30000")
+        put("mail.smtp.starttls.required", "false")
+        // 发信超时放宽：附件大、对方服务器慢的时候，超时太短会误判成"发送失败"
+        put("mail.smtp.connectiontimeout", "30000")
+        put("mail.smtp.timeout", "60000")
+        put("mail.smtp.writetimeout", "60000")
         put("mail.smtp.ssl.trust", acc.smtpHost)
+        put("mail.smtp.socket.keepalive", "true")
         if (acc.oauthToken.isNotBlank() || acc.oauthRefresh.isNotBlank())
             put("mail.smtp.auth.mechanisms", "XOAUTH2")
     }
@@ -149,6 +156,8 @@ object MailService {
     private val lastSeenUid = java.util.concurrent.ConcurrentHashMap<String, Long>()
     // 已发送文件夹改为低频扫描(每 30 轮一次)，不拖慢高频收信检查
     private val sentScanCounter = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    // 正在自愈重试的账号：防止重试风暴把连接池打满
+    private val catchingUp = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
     private fun getStore(acc: Account): Store {
         val c = storeCache[acc.email]
@@ -159,6 +168,12 @@ object MailService {
         return s
     }
 
+    /** 丢弃某个账号缓存的连接：长连接可能"看着还在、其实已经断了"，
+     *  出错后必须彻底重建，否则每轮同步都在同一条死连接上失败，表现为邮件迟迟不到 */
+    private fun invalidateStore(email: String) {
+        runCatching { storeCache.remove(email)?.let { st -> runCatching { st.close() } } }
+    }
+
     // 每账号一把互斥锁：轮询同步与打开正文共用同一条长连接，同一 IMAPFolder 并发 open/close
     // 会协议冲突，表现为“正文一直加载不出来/等一会没反应”，返回重进又正常。串行化后彻底解决。
     private val folderMutexes = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
@@ -166,9 +181,28 @@ object MailService {
         folderMutexes.computeIfAbsent(email) { kotlinx.coroutines.sync.Mutex() }
 
     /** 同步单个账号，返回新收到的邮件(用于通知)。连接复用+增量 UID，速度极快。
-     *  每账号互斥：避免与 loadFull 并发操作同一 IMAP 连接 */
+     *  每账号互斥：避免与 loadFull 并发操作同一 IMAP 连接。
+     *  自愈：任何一次同步失败，立刻丢掉这条(可能早已静默断开的)长连接并用全新连接重试一次，
+     *  保证"网络抖动一次不会让收信卡住十几秒"。 */
     suspend fun syncAccount(ctx: Context, acc: Account, db: AppDatabase): List<MailMessage> =
         mutexFor(acc.email).withLock {
+            if (catchingUp.getOrDefault(acc.email, false)) return@withLock emptyList()
+            catchingUp[acc.email] = true
+            try {
+                syncOnce(ctx, acc, db)
+            } catch (first: Throwable) {
+                invalidateStore(acc.email)
+                try {
+                    syncOnce(ctx, acc, db)
+                } catch (second: Throwable) {
+                    throw second
+                }
+            } finally {
+                catchingUp[acc.email] = false
+            }
+        }
+
+    private suspend fun syncOnce(ctx: Context, acc: Account, db: AppDatabase): List<MailMessage> {
         val newInbox = mutableListOf<MailMessage>()
         val store = getStore(acc)
         val inbox = store.getFolder("INBOX")
@@ -195,8 +229,8 @@ object MailService {
             lastSeenUid[acc.email] = maxOf(maxUid, uidNext - 1)
         } else {
             // 之后每一轮：只拉基线 UID 之后的新邮件(通常 0 封，一次轻量查询，亚秒级完成)
-            val fresh = runCatching { uidFolder.getMessagesByUID((seen0 ?: 0L) + 1, UIDFolder.LASTUID) }.getOrNull()
-            if (fresh != null) newInbox += insertNew(ctx, acc, db, uidFolder, fresh)
+            val fresh = uidFolder.getMessagesByUID((seen0 ?: 0L) + 1, UIDFolder.LASTUID)
+            newInbox += insertNew(ctx, acc, db, uidFolder, fresh)
         }
         runCatching { if (inbox.isOpen) inbox.close(false) }
 
@@ -218,8 +252,8 @@ object MailService {
                 }
             }
         } else sentScanCounter[acc.email] = n
-        newInbox
-        }
+        return newInbox
+    }
 
 
     /** 增量入库：把 UID 大于基线且库里没有的邮件插入，返回新邮件并推进基线(轮询与推送线程共用，幂等) */
@@ -247,43 +281,93 @@ object MailService {
     // 推送版本号：IDLE 线程每收到新邮件就 +1，界面检测到变化立即刷新列表并回顶
     @Volatile var pushVersion = 0
     private val pushStarted = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    // 每条 IDLE 长连接的实际对象与进入空闲的时刻：看门狗按这两个表判断"是真在等推送，还是卡死在死连接上"
+    private val idleStores = java.util.concurrent.ConcurrentHashMap<String, Store>()
+    private val idleEnteredAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val idleFolderRef = java.util.concurrent.ConcurrentHashMap<String, com.sun.mail.imap.IMAPFolder>()
 
     /** 为每个账号启动 IMAP IDLE 长连接推送线程：服务器一有新邮件毫秒级主动通知。
-     *  这是对齐 QQ 邮箱体验的关键：不等轮询，服务器主动推，APP 立刻入库+弹通知+刷新界面。
-     *  轮询同步继续保留作为兑底(网络抖动/IDLE 断开时自动重连重推)。 */
+     *  关键修复：
+     *  1) 断线重连退避从 2→4→8…→60 秒改成 0.4→1→2→3→5 秒(封顶 5 秒)：之前一次抖动就退到 16/32 秒，
+     *     正好表现为"邮件要等十几二十秒才出现"；
+     *  2) 加看门狗：IDLE 卡在一条已静默死亡的连接上(手机切网/基站切换最常见)时，
+     *     120 秒内没有收到任何服务器事件就强制掐断这条连接，立刻重建；
+     *  3) 每轮进入 IDLE 前先做一次增量追赶，重建连接期间的邮件不会漏。 */
     fun startPush(ctx: Context, acc: Account, db: AppDatabase) {
         if (pushStarted.containsKey(acc.email)) return
         pushStarted[acc.email] = true
         Thread {
-            var backoff = 2000L
+            var backoff = 400L
             while (true) {
+                var store: Store? = null
+                val sessionStart = System.currentTimeMillis()
                 try {
-                    kotlinx.coroutines.runBlocking {
-                        // 先建立 UID 基线，避免 IDLE 首轮全量拉取
-                        runCatching { syncAccount(ctx, acc, db) }
-                        val store = connectImap(acc)
-                        val f = store.getFolder("INBOX") as com.sun.mail.imap.IMAPFolder
-                        if (!f.isOpen) f.open(Folder.READ_ONLY)
-                        while (f.isOpen) {
-                            try {
-                                f.idle() // 阻塞直到服务器推送(新邮件/状态变化)或心跳返回，几乎零延迟
-                            } catch (e: Exception) { break }
-                            runCatching {
-                                val fresh = f.getMessagesByUID((lastSeenUid[acc.email] ?: 0L) + 1, UIDFolder.LASTUID)
-                                val newOnes = insertNew(ctx, acc, db, f, fresh)
-                                newOnes.filter { it.folder == "INBOX" }
-                                    .forEach { SyncWorker.notifyNew(ctx, it.accountId, it) }
-                                if (newOnes.isNotEmpty()) pushVersion++
-                            }
+                    // 进入 IDLE 前先追赶一次：上一次连接断开期间到达的邮件在这里补齐
+                    kotlinx.coroutines.runBlocking { runCatching { syncAccount(ctx, acc, db) } }
+                    store = connectImap(acc)
+                    idleStores[acc.email] = store
+                    val f = store.getFolder("INBOX") as com.sun.mail.imap.IMAPFolder
+                    idleFolderRef[acc.email] = f
+                    if (!f.isOpen) f.open(Folder.READ_ONLY)
+                    while (f.isOpen) {
+                        idleEnteredAt[acc.email] = System.currentTimeMillis()
+                        try {
+                            f.idle() // 阻塞直到服务器推送(新邮件/状态变化)或连接被掐断
+                        } catch (e: Exception) {
+                            break
                         }
-                        runCatching { store.close() }
+                        idleEnteredAt[acc.email] = 0L
+                        // 服务器有新事件 → 立刻走一次标准增量同步(独立连接、自带去重与自愈)，
+                        // 避免在这里直接操作正在 IDLE 的那条连接造成协议冲突
+                        val newOnes = kotlinx.coroutines.runBlocking {
+                            runCatching { syncAccount(ctx, acc, db) }.getOrDefault(emptyList())
+                        }
+                        kotlinx.coroutines.runBlocking {
+                            newOnes.filter { it.folder == "INBOX" }
+                                .forEach { SyncWorker.notifyNew(ctx, it.accountId, it) }
+                        }
+                        if (newOnes.isNotEmpty()) pushVersion++
                     }
-                } catch (t: Throwable) { }
-                // 断线后自动重连(退避，最长 60 秒一次；正常情况下连接一直活着感知不到这里)
-                try { Thread.sleep(backoff) } catch (e: InterruptedException) { return@Thread }
-                backoff = minOf(backoff * 2, 60000)
+                    runCatching { if (f.isOpen) f.close(false) }
+                } catch (t: Throwable) {
+                    // 连接建立/鉴权失败：走下面的快速退避重建
+                } finally {
+                    idleEnteredAt[acc.email] = 0L
+                    idleFolderRef.remove(acc.email)
+                    idleStores.remove(acc.email)
+                    runCatching { store?.close() }
+                }
+                // 连接曾经稳定跑过一段时间(>60 秒) → 退避归零，重新抖动时还是秒级恢复
+                if (System.currentTimeMillis() - sessionStart > 60_000) backoff = 400L
+                try { Thread.sleep(backoff) } catch (e: InterruptedException) { pushStarted.remove(acc.email); return@Thread }
+                backoff = minOf(backoff * 2, 5000L)
             }
         }.apply { isDaemon = true; name = "cloudmail-idle-${acc.email}" }.start()
+
+        // 看门狗：每分钟检查一次，某账号在 IDLE 里"无声无息"超过 120 秒说明连接已死(RFC 里服务器
+        // 30 分钟内必回事件，正常情况下不会有 2 分钟静默)，直接掐断连接让上面的循环立刻重建
+        if (watchdogStarted.compareAndSet(false, true)) {
+            Thread {
+                while (true) {
+                    try { Thread.sleep(20_000) } catch (e: InterruptedException) { return@Thread }
+                    for (email in idleStores.keys.toList()) {
+                        val entered = idleEnteredAt[email] ?: 0L
+                        if (entered > 0L && System.currentTimeMillis() - entered > 120_000L) {
+                            runCatching { idleFolderRef[email]?.close(false) }
+                            runCatching { idleStores[email]?.close() }
+                        }
+                    }
+                }
+            }.apply { isDaemon = true; name = "cloudmail-idle-watchdog" }.start()
+        }
+    }
+
+    private val watchdogStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 主动踢一下某个账号：设置页"立即重连"、网络恢复广播都可调用 */
+    fun kickPush(email: String) {
+        runCatching { idleFolderRef[email]?.close(false) }
+        runCatching { idleStores[email]?.close() }
     }
 
     private fun toEntity(accId: Long, folder: String, uid: String, m: Message, ctx: Context): MailMessage {
@@ -437,15 +521,49 @@ object MailService {
         val cardHtml: String
     )
 
+    /** 地址清洗：拆分隔符、去空格、去重复、过滤明显不合法的地址 */
+    private fun normalizeAddrs(raw: List<String>): List<String> =
+        raw.flatMap { it.split(",", ";", "，", "；") }
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .filter { it.contains("@") && !it.contains(" ") }
+            .distinct()
+
+    /** 发送一封邮件。失败自动重试 3 次(网络抖动/服务器临时拒绝/令牌过期)，
+     *  全部失败才抛异常给上层，保证"能发出去就一定发出去"，不会因为一次超时就判失败。 */
     fun sendMail(acc: Account, req: SendRequest): String {
+        val to = normalizeAddrs(req.to)
+        val cc = normalizeAddrs(req.cc)
+        val bcc = normalizeAddrs(req.bcc)
+        if (to.isEmpty() && cc.isEmpty() && bcc.isEmpty())
+            throw IllegalArgumentException("没有有效的收件人地址，请检查收件人邮箱")
+
+        var lastError: Exception? = null
+        for (attempt in 1..3) {
+            try {
+                return sendOnce(acc, req.copy(to = to, cc = cc, bcc = bcc))
+            } catch (e: Exception) {
+                lastError = e
+                if (!isTransient(e) || attempt == 3) throw e
+                // 可能是 OAuth 令牌过期/连接被服务端限流：丢掉缓存令牌与连接，退避后再试一次
+                tokenCache.remove(acc.email)
+                invalidateStore(acc.email)
+                try { Thread.sleep(if (attempt == 1) 1500L else 3000L) } catch (ignore: InterruptedException) {}
+            }
+        }
+        throw lastError ?: Exception("发送失败：未知错误")
+    }
+
+    private fun sendOnce(acc: Account, req: SendRequest): String {
         val session = Session.getInstance(smtpProps(acc))
         val mime = MimeMessage(session)
         mime.setFrom(InternetAddress(acc.email, acc.nickname.ifBlank { acc.email }))
-        req.to.filter { it.isNotBlank() }.forEach { mime.addRecipient(Message.RecipientType.TO, InternetAddress(it.trim())) }
-        req.cc.filter { it.isNotBlank() }.forEach { mime.addRecipient(Message.RecipientType.CC, InternetAddress(it.trim())) }
-        req.bcc.filter { it.isNotBlank() }.forEach { mime.addRecipient(Message.RecipientType.BCC, InternetAddress(it.trim())) }
+        req.to.forEach { mime.addRecipient(Message.RecipientType.TO, InternetAddress(it.trim())) }
+        req.cc.forEach { mime.addRecipient(Message.RecipientType.CC, InternetAddress(it.trim())) }
+        req.bcc.forEach { mime.addRecipient(Message.RecipientType.BCC, InternetAddress(it.trim())) }
         mime.subject = req.subject
         mime.sentDate = Date()
+        mime.setHeader("MIME-Version", "1.0")
         if (req.readReceipt) mime.setHeader("Disposition-Notification-To", acc.email)
 
         val container = MimeMultipart("mixed")
@@ -464,19 +582,24 @@ object MailService {
 
         // 附件(内联图片用 cid 引用)
         req.attachments.forEach { a ->
-            val bp = MimeBodyPart()
-            bp.attachFile(java.io.File(a.path))
-            bp.fileName = MimeUtility.encodeText(a.name)
-            if (a.isInline && a.cid.isNotBlank()) {
-                bp.contentID = "<${a.cid}>"
-                bp.disposition = Part.INLINE
+            try {
+                val bp = MimeBodyPart()
+                bp.attachFile(java.io.File(a.path))
+                bp.fileName = MimeUtility.encodeText(a.name)
+                if (a.isInline && a.cid.isNotBlank()) {
+                    bp.contentID = "<${a.cid}>"
+                    bp.disposition = Part.INLINE
+                }
+                container.addBodyPart(bp)
+            } catch (e: Exception) {
+                // 单个附件读取失败(文件被删/权限丢失)不能让整封邮件发不出去
             }
-            container.addBodyPart(bp)
         }
         mime.setContent(container)
         Transport.send(mime, acc.email, ensureToken(acc))
 
-        // 保存到已发送 (IMAP APPEND)
+        // 真实已读回执的替代：保存到已发送 (IMAP APPEND)。失败不影响"已成功发出"的结论。
+        // 用独立连接，避免和同步线程共用一条连接造成协议冲突
         runCatching {
             connectImap(acc).use { store ->
                 val f = sentFolder(store)
@@ -488,6 +611,29 @@ object MailService {
             }
         }
         return mime.messageID ?: ""
+    }
+
+    /** 临时性错误(值得自动重试)：超时、连接中断、被限流、鉴权过期、4xx 软退信 */
+    fun isTransient(e: Exception): Boolean = when (e) {
+        is java.net.SocketTimeoutException -> true
+        is java.net.ConnectException -> true
+        is javax.mail.AuthenticationFailedException -> true
+        // 没网 / DNS 暂时不可用 / socket 被重置：都可恢复，等网络回来要继续发
+        is java.net.UnknownHostException -> true
+        is java.net.SocketException -> true
+        is java.io.IOException -> true
+        is com.sun.mail.smtp.SMTPAddressFailedException -> e.returnCode in 400..499
+        is com.sun.mail.smtp.SMTPSendFailedException -> e.returnCode in 400..499
+        is javax.mail.SendFailedException -> false
+        is javax.mail.MessagingException -> {
+            val msg = (e.message ?: "") + (e.cause?.message ?: "")
+            e.cause is java.io.IOException ||
+                listOf("Could not connect", "Exception reading response", "EOF", "Connection reset",
+                       "timed out", "Temporary", "try again", "421", "454", "Connection closed").any {
+                    msg.contains(it, ignoreCase = true)
+                }
+        }
+        else -> false
     }
 
     private fun plainOf(html: String): String =

@@ -72,9 +72,19 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         } catch (e: Exception) {
             // 真实失败原因(分类为可读中文)
             val reason = MailService.smtpErrorText(e)
-            db.outbox().update(item.copy(status = "FAILED", error = reason, scheduledAt = null, updatedAt = System.currentTimeMillis()))
-            AppNotify.sendFail(applicationContext, item.subject, reason)
-            Result.failure()
+            // MailService 内部已经重试过 3 次仍失败：区分「临时故障」与「真实拒收」。
+            // 临时故障(超时/断网/服务器 4xx/令牌过期)交给 WorkManager 退避再试，不直接判死，
+            // 保证网络恢复后邮件仍会自动发出去；邮件保留在待发送箱里，界面能看到。
+            if (MailService.isTransient(e) && runAttemptCount < 3) {
+                db.outbox().update(item.copy(status = "QUEUED", error = reason,
+                    scheduledAt = null, updatedAt = System.currentTimeMillis()))
+                AppNotify.cancelSending(applicationContext)
+                Result.retry()
+            } else {
+                db.outbox().update(item.copy(status = "FAILED", error = reason, scheduledAt = null, updatedAt = System.currentTimeMillis()))
+                AppNotify.sendFail(applicationContext, item.subject, reason)
+                Result.failure()
+            }
         }
     }
 
@@ -123,12 +133,14 @@ class SendWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             """.trimIndent()
         }
 
-        /** 立即发送 */
+        /** 立即发送：同一封邮件只用唯一任务名入队，连点发送按钮不会重复投递 */
         fun sendNow(context: Context, itemId: Long) {
-            androidx.work.OneTimeWorkRequest.Builder(SendWorker::class.java)
+            val req = androidx.work.OneTimeWorkRequest.Builder(SendWorker::class.java)
                 .setInputData(androidx.work.Data.Builder().putLong("itemId", itemId).build())
+                .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 20, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
-                .let { androidx.work.WorkManager.getInstance(context).enqueue(it) }
+            androidx.work.WorkManager.getInstance(context)
+                .enqueueUniqueWork("send_now_$itemId", androidx.work.ExistingWorkPolicy.KEEP, req)
         }
 
         /** 定时发送：到点真实触发(WorkManager 持久化，APP 被清理后到点仍会发送) */

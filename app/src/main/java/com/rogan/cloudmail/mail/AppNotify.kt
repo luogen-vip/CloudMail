@@ -24,6 +24,7 @@ object AppNotify {
     const val CH_SEND_OK = "send_ok"      // 发送成功
     const val CH_SEND_FAIL = "send_fail"  // 发送失败
     const val CH_SENDING = "sending"      // 发送中(静默常驻)
+    const val CH_PUSH = "push"            // 实时收信前台服务(静默常驻)
 
     private fun soundUri(uri: Uri?): AudioAttributes? = uri?.let {
         AudioAttributes.Builder()
@@ -56,6 +57,27 @@ object AppNotify {
             description = "邮件正在发送的状态"
             setSound(null, null)
         })
+        nm.createNotificationChannel(NotificationChannel(CH_PUSH, "实时收信", NotificationManager.IMPORTANCE_MIN).apply {
+            description = "保持与邮箱服务器的长连接，新邮件即时到达"
+            setSound(null, null)
+            setShowBadge(false)
+            enableVibration(false)
+        })
+    }
+
+    /** 实时收信常驻通知：低优先级、无声音、不打扰，只为把进程保活 */
+    fun pushService(ctx: Context, text: String): android.app.Notification {
+        ensureChannels(ctx)
+        return NotificationCompat.Builder(ctx, CH_PUSH)
+            .setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle("云邮 · 实时收信")
+            .setContentText(text)
+            .setOngoing(true)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setContentIntent(openApp(ctx))
+            .build()
     }
 
     private fun openApp(ctx: Context, msgId: Long = -1): PendingIntent {

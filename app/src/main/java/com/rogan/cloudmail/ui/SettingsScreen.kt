@@ -60,6 +60,22 @@ fun SettingsScreen(nav: NavHostController) {
                 Icon(Icons.Default.PersonAdd, null, Modifier.size(18.dp)); Text(" 添加邮箱账号")
             }
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Text("收信", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            var realtime by remember { mutableStateOf(com.rogan.cloudmail.mail.MailPushService.isEnabled(ctx)) }
+            ListItem(
+                headlineContent = { Text("后台实时收信") },
+                supportingContent = {
+                    Text("保持与服务器的长连接，新邮件秒级到达；开启后状态栏会有一条常驻通知(静音)")
+                },
+                leadingContent = { Icon(Icons.Default.Bolt, null) },
+                trailingContent = {
+                    Switch(checked = realtime, onCheckedChange = {
+                        realtime = it
+                        com.rogan.cloudmail.mail.MailPushService.setEnabled(ctx, it)
+                    })
+                }
+            )
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text("管理", fontSize = 16.sp, fontWeight = FontWeight.Bold)
             ListItem(headlineContent = { Text("联系人") },
                 leadingContent = { Icon(Icons.Default.People, null) },

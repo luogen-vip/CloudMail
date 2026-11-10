@@ -144,6 +144,8 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
             if (result == null) return@launch
             val (accs, uMap, ob, empty, lbs) = result
             accounts = accs as List<com.rogan.cloudmail.data.Account>
+            // 有账号就拉起前台实时收信服务：IDLE 长连接在后台也保持，新邮件秒级到达
+            if (accounts.isNotEmpty()) com.rogan.cloudmail.mail.MailPushService.startIfNeeded(ctx)
             unreadMap = uMap as Map<Long, Int>
             outboxCount = ob as Int
             dbEmpty = empty as Boolean
@@ -217,6 +219,9 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 syncMsg = "正在刷新收件箱…" // 手动刷新立刻给出可见反馈，用户知道刷新已生效
             }
             scope.launch(Dispatchers.IO) {
+              // 加固：无论同步过程中抛出什么异常，都必须在 finally 里复位状态。
+              // 之前一旦中途异常，syncing 会永久卡在 true，之后所有自动同步都被跳过(表现为邮件迟迟不到)
+              try {
                 val accs = runCatching {
                     if (folder.startsWith("account:"))
                         listOfNotNull(db.accounts().byId(folder.substringAfter(":").toLong()))
@@ -249,6 +254,14 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                         syncMsg = "收到 ${newMails.size} 封新邮件"
                     }
                 }
+              } catch (t: Throwable) {
+                kotlinx.coroutines.withContext(Dispatchers.Main) { syncing = false; manualSync = false }
+              } finally {
+                // 极端情况下(协程被取消等)也把状态放开，避免自动同步被永久锁死
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    kotlinx.coroutines.withContext(Dispatchers.Main) { syncing = false; manualSync = false }
+                }
+              }
             }
         } else if (showBar) {
             // 已有同步在进行：等它结束后立刻再补一次真实拉取，保证手动刷新一定拿到最新
