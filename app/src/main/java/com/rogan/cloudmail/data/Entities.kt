@@ -46,7 +46,8 @@ data class MailMessage(
     var hasAttachments: Boolean,
     var attachmentsJson: String,    // [{name,path,mime,isInline,cid}]
     var loaded: Boolean,            // 正文是否已拉取
-    var size: Long = 0              // 邮件大小(字节)
+    var size: Long = 0,             // 邮件大小(字节)
+    var pinnedAt: Long = 0          // 置顶时间(0=未置顶；置顶多封时按置顶时间倒序依次排列)
 )
 
 @Entity(tableName = "contacts")
@@ -160,6 +161,12 @@ interface MessageDao {
     @Update suspend fun update(m: MailMessage)
     @Query("UPDATE messages SET isRead = :read WHERE id = :id") suspend fun setRead(id: Long, read: Boolean)
     @Query("UPDATE messages SET isStarred = :star WHERE id = :id") suspend fun setStar(id: Long, star: Boolean)
+    @Query("UPDATE messages SET pinnedAt = :t WHERE id = :id") suspend fun setPinned(id: Long, t: Long)
+    // 某个地址的全部往来邮件(我发的+TA发的，含抄送)
+    @Query("SELECT * FROM messages WHERE folder IN ('INBOX','SENT') AND " +
+            "(fromAddr = :addr OR toAddr LIKE '%'||:addr||'%' OR ccAddr LIKE '%'||:addr||'%') " +
+            "ORDER BY pinnedAt > 0 DESC, pinnedAt DESC, date DESC")
+    suspend fun conversation(addr: String): List<MailMessage>
     @Query("UPDATE messages SET folder = :folder WHERE id = :id") suspend fun setFolder(id: Long, folder: String)
     @Query("DELETE FROM messages WHERE id = :id") suspend fun deleteForever(id: Long)
     @Query("DELETE FROM messages WHERE folder = 'TRASH'") suspend fun emptyTrash()
