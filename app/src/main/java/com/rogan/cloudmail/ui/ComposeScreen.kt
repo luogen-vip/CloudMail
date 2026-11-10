@@ -27,6 +27,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -95,11 +98,14 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     var subject by remember { mutableStateOf(TextFieldValue("")) }
     val blocks = remember { mutableStateListOf<BodyBlock>(BodyBlock.T(nextBlockId(), TextFieldValue(""))) }
     var focusBlockId by remember { mutableStateOf<Long?>(null) }
+    // 插入图片/链接/卡片后自动把光标定位到新块后面的文本块：用户可直接继续输入文字，
+    // 不用再手动点一下下面才知道哪里能输入(autoFocusId 匹配的文本块会自动请求焦点并弹键盘)
     // 实时记录真实光标位置(哪个文本块+第几个字)：每次输入/聚焦都更新。
     // 之前只记 focusBlockId，点插入链接弹窗后焦点丢到弹窗上，插入位置回退逻辑可能算错，
     // 导致链接插到离正文几行远的地方；记录真实光标后插入位置永远精确
     var cursorBlockId by remember { mutableStateOf<Long?>(null) }
     var cursorPos by remember { mutableStateOf(0) }
+    var autoFocusId by remember { mutableStateOf<Long?>(null) }
     var atts by remember { mutableStateOf(listOf<AttInfo>()) }
     var readReceipt by remember { mutableStateOf(false) }
     var cardMode by remember { mutableStateOf(false) }
@@ -202,7 +208,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
 
     /** 在光标处插入块：把光标所在文本块在光标处拆开，中间插入新块。
      *  - 光标位置用实时记录的 cursorBlockId/cursorPos(精确到字)，不再依赖弹窗打开后已丢失的焦点状态
-     *  - 拆分后若光标后面只剩空白，不再生成空文本块(否则链接下面会多出几行空白) */
+     *  - 拆分后若光标后面只剩空白，不再生成空文本块(否则链接下面会多出几行空白)
+     *  - 插入完成后自动把光标定位到新块后面的文本块(没有就在新块后面补一个)，直接可输入文字 */
     fun insertIntoBody(b: BodyBlock) {
         val cid = cursorBlockId
         val idx = if (cid != null) blocks.indexOfFirst { it.id == cid && it is BodyBlock.T } else -1
@@ -242,6 +249,21 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 val lastIdx = blocks.indexOfLast { it is BodyBlock.T && it.tv.text.isNotBlank() }
                 if (lastIdx >= 0) blocks.add(lastIdx + 1, b)
                 else blocks.add(b)
+            }
+        }
+        // 插入后自动光标：找到新块后面的第一个文本块；没有就在新块正下方补一个(继承旁边的字体/字色)，
+        // 并把光标定位过去 → 插入图片/卡片/链接后立刻就能继续打字，不用再找哪里能点
+        run {
+            val bi = blocks.indexOfFirst { it.id == b.id }
+            var target: BodyBlock.T? = null
+            if (bi >= 0) {
+                for (i in bi + 1 until blocks.size) { val x = blocks[i]; if (x is BodyBlock.T) { target = x; break } }
+                if (target == null) {
+                    val prev = blocks.getOrNull(bi - 1) as? BodyBlock.T
+                    val nt = BodyBlock.T(nextBlockId(), TextFieldValue(""), prev?.color ?: "", prev?.font ?: "")
+                    blocks.add(bi + 1, nt); target = nt
+                }
+                target.let { t2 -> autoFocusId = t2!!.id; cursorBlockId = t2!!.id; cursorPos = 0 }
             }
         }
     }
@@ -695,6 +717,15 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             "sans-serif" -> androidx.compose.ui.text.font.FontFamily.SansSerif
                             else -> androidx.compose.ui.text.font.FontFamily.Default
                         }
+                        // 插入图片/卡片/链接后自动把光标定位到这个文本块：直接可继续输入文字，
+                        // 不用再手动点下面哪里能输入；点其他任意位置输入也仍然照常可用
+                        val focusReq = remember { FocusRequester() }
+                        androidx.compose.runtime.LaunchedEffect(autoFocusId) {
+                            if (autoFocusId == b.id) {
+                                runCatching { focusReq.requestFocus() }
+                                if (autoFocusId == b.id) autoFocusId = null
+                            }
+                        }
                         TextField(
                         value = b.tv,
                         onValueChange = { i ->
@@ -716,6 +747,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             // 只有唯一正文块(空邮件初始)才撑满高度；链接/图片插入后拆出的相邻文本块保持紧凑，
                             // 视觉上仍是一个连续正文区，不再出现“两个大正文块”的观感
                             minHeight = if (blocks.size == 1) 180.dp else 40.dp)
+                            .focusRequester(focusReq)
                             .onFocusChanged {
                                 if (it.isFocused) {
                                     focusBlockId = b.id
@@ -752,9 +784,13 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                             },
                             onLongClick = { editLink = b }))
                     // 编辑视图与发送效果一致：卡片块就只显示卡片本身，下方不再挂“重新编辑/删除”文字行；
-                    // 点击卡片=弹出操作菜单(重新编辑/删除)，长按卡片=直接重新编辑
+                    // 点击卡片=弹出操作菜单(重新编辑/删除)，长按卡片=直接重新编辑。
+                    // 点击热区精确到卡片本身：WebView 高度跟随卡片真实内容高度(onPageFinished 后量内容高)，
+                    // 卡片下面不再有一大块“看似空白、点了却弹菜单”的区域
                     is BodyBlock.Card -> {
                         var cardMenu by remember(b.id) { mutableStateOf(false) }
+                        val dens = LocalDensity.current
+                        var cardH by remember(b.id) { mutableStateOf(210) }
                         val previewHtml = buildString {
                             var h = b.html
                             atts.filter { it.cid.isNotBlank() && it.path.isNotBlank() && File(it.path).exists() }
@@ -770,10 +806,22 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                                     settings.javaScriptEnabled = false
                                     settings.allowFileAccess = true
                                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                    // 不抢触摸/焦点：首次点卡片的响应更快，也不会被 WebView 吞掉第一次点击
+                                    isFocusable = false; isClickable = false; isLongClickable = false
+                                    isHapticFeedbackEnabled = false
+                                    // 卡片高度自适应内容：量出真实内容高，点击热区只剩卡片本身
+                                    webViewClient = object : android.webkit.WebViewClient() {
+                                        override fun onPageFinished(v: android.webkit.WebView, u: String?) {
+                                            v.postDelayed({
+                                                val h = (v.contentHeight * v.scale).toInt()
+                                                if (h > 40) cardH = (h / dens.density).toInt().coerceIn(70, 420)
+                                            }, 500)
+                                        }
+                                    }
                                 }
                             }, update = { wv ->
                                 wv.loadDataWithBaseURL("file:///android_asset/", previewHtml, "text/html", "utf-8", null)
-                            }, modifier = Modifier.fillMaxWidth().height(210.dp))
+                            }, modifier = Modifier.fillMaxWidth().height(cardH.dp))
                             Box(Modifier.matchParentSize().combinedClickable(
                                 onClick = { cardMenu = true },
                                 onLongClick = { editCard = b }))
@@ -979,9 +1027,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             var cb by remember(editing?.id) { mutableStateOf(TextFieldValue(cardField(editing?.html, "b"))) }
             var clt by remember(editing?.id) { mutableStateOf(TextFieldValue(cardField(editing?.html, "lt"))) }
             var clu by remember(editing?.id) { mutableStateOf(TextFieldValue(cardField(editing?.html, "lu"))) }
+            // 链接文字颜色跟随模板背景：深色模板用白色，浅色模板用深色，
+            // 之前一律用白色，浅色背景上链接文字“看不见”(但点击有效)，看起来像链接丢了
             fun linkHtmlNow(): String =
                 if (clt.text.isNotBlank() && clu.text.trim().startsWith("http"))
-                    "<a href=\"${clu.text.trim()}\" style=\"color:#ffffff;text-decoration:underline\">${escXml(clt.text.trim())}</a>" else ""
+                    "<a href=\"${clu.text.trim()}\" style=\"color:${cardLinkColor(tpl)};text-decoration:underline\">${escXml(clt.text.trim())}</a>" else ""
             AlertDialog(onDismissRequest = { showCardTpl = false; editCard = null },
                 title = { Text(if (editing == null) "插入卡片" else "重新编辑卡片") },
                 text = {
@@ -1029,7 +1079,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                     TextButton(onClick = {
                         if (ct.text.isBlank() && cb.text.isBlank()) { toast = "卡片标题和正文至少填一个"; return@TextButton }
                         val linkHtml = if (clt.text.isNotBlank() && clu.text.trim().startsWith("http"))
-                            "<a href=\"${clu.text.trim()}\" style=\"color:#ffffff;text-decoration:underline\">${escXml(clt.text.trim())}</a>" else ""
+                            "<a href=\"${clu.text.trim()}\" style=\"color:${cardLinkColor(tpl)};text-decoration:underline\">${escXml(clt.text.trim())}</a>" else ""
                         val html = buildCardHtml(tpl, escXml(ct.text.trim()), escXml(cb.text.trim()).replace("\n", "<br/>"), linkHtml)
                         val wrapped = "<!--CARD:$tpl-->$html<!--/CARD-->"
                         if (editing != null) {
@@ -1177,47 +1227,20 @@ fun ComposeStyleToolbar(blocks: MutableList<BodyBlock>, cursorBlockId: Long?,
         ?: blocks.lastOrNull { it is BodyBlock.T } as? BodyBlock.T
     var fontMenu by remember { mutableStateOf(false) }
     Column {
-        Row(Modifier.fillMaxWidth().horizontalScroll(androidx.compose.foundation.rememberScrollState()),
-            verticalAlignment = Alignment.CenterVertically) {
+        // 第 1 行：图片/文件/卡片 + 字体(右侧)。整行固定宽度内放得下，不用横向滑动
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onPickImage, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
                 Icon(Icons.Default.Image, null, Modifier.size(16.dp)); Text(" 图片", fontSize = 12.sp) }
             TextButton(onClick = onPickFile, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
                 Icon(Icons.Default.AttachFile, null, Modifier.size(16.dp)); Text(" 文件", fontSize = 12.sp) }
             TextButton(onClick = onShowCard, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
                 Icon(Icons.Default.Style, null, Modifier.size(16.dp)); Text(" 卡片", fontSize = 12.sp) }
-            Text("字色：${PALETTE.firstOrNull { it.first == (curT?.color ?: "") }?.second ?: "自定义"}",
-                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 8.dp))
-        }
-        Row(Modifier.fillMaxWidth().horizontalScroll(androidx.compose.foundation.rememberScrollState()),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center) {
-            PALETTE.forEach { (c, name) ->
-                val selected = (curT?.color ?: "") == c
-                Box(Modifier.padding(3.dp)
-                    .size(26.dp)
-                    .then(if (selected) Modifier.border(2.dp, MaterialTheme.colorScheme.primary,
-                        androidx.compose.foundation.shape.CircleShape) else Modifier)
-                    .padding(2.dp)
-                    .background(if (c.isBlank()) MaterialTheme.colorScheme.onSurface
-                        else androidx.compose.ui.graphics.Color(android.graphics.Color.parseColor(c)),
-                        androidx.compose.foundation.shape.CircleShape)
-                    .clickable {
-                        val idx = blocks.indexOfFirst { it.id == (curT?.id ?: -1L) }
-                        if (idx >= 0 && blocks[idx] is BodyBlock.T) {
-                            val t = blocks[idx] as BodyBlock.T
-                            blocks[idx] = BodyBlock.T(t.id, t.tv, c, t.font)
-                        }
-                        onUserEdit()
-                    })
-            }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.weight(1f))
             Box {
                 TextButton(onClick = { fontMenu = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     enabled = curT != null) {
-                    // 完整显示当前字体名，不再被挤成半个字
                     Text("字体：${fontLabel(curT?.font ?: "")}", fontSize = 12.sp, maxLines = 1,
-                        modifier = Modifier.widthIn(min = 74.dp))
+                        modifier = Modifier.widthIn(min = 70.dp))
                 }
                 DropdownMenu(expanded = fontMenu, onDismissRequest = { fontMenu = false }) {
                     listOf("" to "默认字体", "sans-serif" to "无衬线", "serif" to "衬线(宋体风)",
@@ -1237,6 +1260,33 @@ fun ComposeStyleToolbar(blocks: MutableList<BodyBlock>, cursorBlockId: Long?,
                 }
             }
         }
+        // 第 2 行：8 个色球 + 当前颜色名。缩紧间距后一屏内全部可见，
+        // 不再需要向左滑动才能看到最右边的字体/颜色(观感更整齐)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center) {
+            PALETTE.forEach { (c, name) ->
+                val selected = (curT?.color ?: "") == c
+                Box(Modifier.padding(horizontal = 2.dp)
+                    .size(24.dp)
+                    .then(if (selected) Modifier.border(2.dp, MaterialTheme.colorScheme.primary,
+                        androidx.compose.foundation.shape.CircleShape) else Modifier)
+                    .padding(2.dp)
+                    .background(if (c.isBlank()) MaterialTheme.colorScheme.onSurface
+                        else androidx.compose.ui.graphics.Color(android.graphics.Color.parseColor(c)),
+                        androidx.compose.foundation.shape.CircleShape)
+                    .clickable {
+                        val idx = blocks.indexOfFirst { it.id == (curT?.id ?: -1L) }
+                        if (idx >= 0 && blocks[idx] is BodyBlock.T) {
+                            val t = blocks[idx] as BodyBlock.T
+                            blocks[idx] = BodyBlock.T(t.id, t.tv, c, t.font)
+                        }
+                        onUserEdit()
+                    })
+            }
+            Spacer(Modifier.width(6.dp))
+            Text("字色：${PALETTE.firstOrNull { it.first == (curT?.color ?: "") }?.second ?: "自定义"}",
+                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        }
     }
 }
 
@@ -1245,6 +1295,11 @@ fun ComposeStyleToolbar(blocks: MutableList<BodyBlock>, cursorBlockId: Long?,
 fun cardName(tpl: Int) = when (tpl) {
     0 -> "蓝紫渐变"; 1 -> "简约蓝条"; 2 -> "深色"; 3 -> "暖橙渐变"; 4 -> "清新绿"
     5 -> "粉紫渐变"; 6 -> "米金描边"; else -> "极简黑框"
+}
+
+/** 卡片链接文字颜色跟随模板：深色背景用白色、浅色背景用深色/蓝色，保证链接文字肉眼可见 */
+fun cardLinkColor(tpl: Int) = when (tpl) {
+    1 -> "#1565C0"; 6 -> "#EF6C00"; 7 -> "#1565C0"; else -> "#ffffff"
 }
 
 fun buildCardHtml(tpl: Int, title: String, body: String, linkHtml: String): String {
