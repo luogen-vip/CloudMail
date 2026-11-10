@@ -660,6 +660,7 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         // 键盘跟随(彻底版)：不止键盘弹出时滚一次，而是每次输入/光标落到某个正文块时都检查：
         // 该块整块不在可视区→按 key 精确滚到它；块底部被键盘/屏幕裁掉→把被裁的部分滚上来。
         // 这样不管是纯文字、图片/卡片/链接下面接着输入、还是多块混排，输入内容永远在键盘上方可见。
+        val scrollScope = androidx.compose.runtime.rememberCoroutineScope()
         fun ensureBlockVisible(id: Long) {
             val info = bodyListState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == id }
             if (info == null) {
@@ -667,11 +668,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
                 if (idx >= 0) {
                     // 固定区块数=账号/收件人/名片行/主题/工具行共 5 个，抄送/密送打开时再多 2 个
                     val header = 5 + if (showCc) 2 else 0
-                    runCatching { bodyListState.animateScrollToItem(idx + header) }
+                    scrollScope.launch { runCatching { bodyListState.animateScrollToItem(idx + header) } }
                 }
             } else {
                 val overflow = info.offset + info.size + 60 - bodyListState.layoutInfo.viewportSize.height
-                if (overflow > 0) runCatching { bodyListState.animateScrollBy(overflow.toFloat()) }
+                if (overflow > 0) scrollScope.launch { runCatching { bodyListState.animateScrollBy(overflow.toFloat()) } }
             }
         }
         LaunchedEffect(imeBottom, focusBlockId) {
