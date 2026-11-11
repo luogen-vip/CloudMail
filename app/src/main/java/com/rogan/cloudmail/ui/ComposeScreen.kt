@@ -1101,12 +1101,19 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
         // 名片预览
         if (showCardPreview && acc != null) {
             val cardHtml = remember(acc.id, acc.vcard, acc.avatarPath) {
+                // 头像解码成位图后重编码为 PNG 内嵌(data URI)：PNG 是一次性解码，
+                // 不会像 JPEG(尤其是渐进式)那样先画出上半部分再补下半部分；
+                // 同时也不再依赖 WebView 异步加载 file:// 图片，整卡+头像同一帧出现
+                val avatarData = runCatching {
+                    val f = acc.avatarPath?.let { java.io.File(it) }?.takeIf { it.exists() } ?: return@runCatching null
+                    val bmp = android.graphics.BitmapFactory.decodeFile(f.absolutePath) ?: return@runCatching null
+                    val out = java.io.ByteArrayOutputStream()
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+                    "data:image/png;base64," + android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+                }.getOrNull()
                 SendWorker.cardBlock(acc).replace(
-                    // 头像用 Uri.fromFile 生成合法的 file:// URI(路径含空格/中文也能加载)，
-                    // 之前直接拼 "file://$it" 且 baseUrl 传 null，WebView 拦截了私有目录图片 → 预览头像破裂；
-                    // 发送邮件时头像走 cid 内联附件所以正常
                     "cid:${SendWorker.CARD_AVATAR_CID}",
-                    acc.avatarPath?.let { android.net.Uri.fromFile(java.io.File(it)).toString() } ?: "noavatar")
+                    avatarData ?: "noavatar")
             }
             AlertDialog(onDismissRequest = { showCardPreview = false },
                 title = { Text("名片预览(收件人将看到的效果)") },
