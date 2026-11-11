@@ -58,7 +58,7 @@ fun ChatListScreen(nav: NavHostController) {
     LaunchedEffect(Unit) {
         while (true) {
             val msgs = withContext(Dispatchers.IO) {
-                db.messages().recent().filter { !it.isAd && it.folder in listOf("INBOX", "SENT") }
+                db.messages().allMail().filter { !it.isAd }
             }
             contacts = withContext(Dispatchers.IO) { db.contacts().all() }
             val map = linkedMapOf<String, MutableList<MailMessage>>()
@@ -165,8 +165,8 @@ fun ChatScreen(nav: NavHostController, addr: String) {
             }
             msgs = list
             // 进入聊天即把对方来信标为已读(和 IM 聊天一致)
-            list.filter { it.folder == "INBOX" && !it.isRead }.forEach {
-                runCatching { withContext(Dispatchers.IO) { db.messages().setRead(it.id, true) } }
+            list.filter { it.folder == "INBOX" && !it.isRead }.forEach { m ->
+                runCatching { withContext(Dispatchers.IO) { db.messages().setRead(m.id, true) } }
             }
             // 有新消息时自动滚到底部
             if (list.isNotEmpty()) {
@@ -194,7 +194,7 @@ fun ChatScreen(nav: NavHostController, addr: String) {
                     textStyle = androidx.compose.ui.text.TextStyle(fontSize = 15.sp),
                     maxLines = 4)
                 IconButton(onClick = {
-                    val text = input.text.trim()
+                    val text = input.trim()
                     if (text.isEmpty() || sending) return@IconButton
                     sending = true
                     scope.launch(Dispatchers.IO) {
@@ -228,9 +228,9 @@ fun ChatScreen(nav: NavHostController, addr: String) {
                             }
                         } finally { withContext(Dispatchers.Main) { sending = false } }
                     }
-                }, enabled = input.text.isNotBlank() && !sending) {
+                }, enabled = input.isNotBlank() && !sending) {
                     Icon(Icons.AutoMirrored.Filled.Send, "发送",
-                        tint = if (input.text.isNotBlank()) MaterialTheme.colorScheme.primary
+                        tint = if (input.isNotBlank()) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
