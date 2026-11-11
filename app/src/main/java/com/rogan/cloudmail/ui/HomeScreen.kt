@@ -73,6 +73,10 @@ fun RootNav(pendingMessageId: () -> Long, onConsumePending: () -> Unit) {
             ComposeScreen(nav, draftId = -1L, presetTo = "", reeditId = back.arguments?.getString("id")?.toLong() ?: -1L)
         }
         composable("search") { SearchScreen(nav) }
+        composable("chat") { ChatListScreen(nav) }
+        composable("chat/{addr}") { back ->
+            ChatScreen(nav, addr = java.net.URLDecoder.decode(back.arguments?.getString("addr") ?: "", "UTF-8"))
+        }
     }
 }
 
@@ -435,6 +439,10 @@ fun HomeScreen(nav: NavHostController, pendingMessageId: () -> Long, onConsumePe
                 TopAppBar(
                     title = { Text(folderTitle(folder)) },
                     actions = {
+                        // 聊天模式入口：把邮件按联系人渲染成聊天气泡(底层仍是真实邮件)
+                        IconButton(onClick = { nav.navigate("chat") }) {
+                            Icon(Icons.Default.Chat, "聊天模式(邮件按联系人显示成聊天)")
+                        }
                         IconButton(onClick = { doSync(true) }) {
                             Icon(Icons.Default.Refresh, "同步/刷新收件(检查新邮件)")
                         }
