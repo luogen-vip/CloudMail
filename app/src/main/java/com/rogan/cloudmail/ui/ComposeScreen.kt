@@ -1103,14 +1103,8 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             val cardHtml = remember(acc.id, acc.vcard, acc.avatarPath) {
                 // 头像解码成位图后重编码为 PNG 内嵌(data URI)：PNG 是一次性解码，
                 // 不会像 JPEG(尤其是渐进式)那样先画出上半部分再补下半部分；
-                // 同时也不再依赖 WebView 异步加载 file:// 图片，整卡+头像同一帧出现
-                val avatarData = runCatching {
-                    val f = acc.avatarPath?.let { java.io.File(it) }?.takeIf { it.exists() } ?: return@runCatching null
-                    val bmp = android.graphics.BitmapFactory.decodeFile(f.absolutePath) ?: return@runCatching null
-                    val out = java.io.ByteArrayOutputStream()
-                    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
-                    "data:image/png;base64," + android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
-                }.getOrNull()
+                // AvatarPng 带(路径+修改时间)缓存，第二次打开预览不用重新编码，几乎秒出
+                val avatarData = AvatarPng.get(acc.avatarPath)
                 SendWorker.cardBlock(acc).replace(
                     "cid:${SendWorker.CARD_AVATAR_CID}",
                     avatarData ?: "noavatar")
@@ -1118,10 +1112,11 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
             AlertDialog(onDismissRequest = { showCardPreview = false },
                 title = { Text("名片预览(收件人将看到的效果)") },
                 text = {
-                    // 与卡片预览/正文共用同一预览组件：baseUrl 指向 assets + allowFileAccess，
-                    // file:// 头像图片能正常加载，不再破裂
+                    // 与卡片预览/正文共用同一预览组件：baseUrl 指向 assets + allowFileAccess。
+                    // 名片只用系统字体，不引 fontFaceCss(两个内置 .otf 字体有几 MB，
+                    // WebView 要把字体加载完才触发 onPageFinished → 之前预览要 1 秒多才显示)
                     CardPreviewWebView(nav,
-                        "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'/>${fontFaceCss()}</head>" +
+                        "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'/></head>" +
                         "<body style=\"font-family:sans-serif\">$cardHtml</body></html>",
                         220.dp, "file:///android_asset/")
                 },
@@ -1355,6 +1350,28 @@ fun sniffKind(path: String): String = runCatching {
         }
     }
 }.getOrDefault("")
+
+/** 名片头像 PNG data URI 缓存：键=路径+文件修改时间，头像没换过就直接复用上次编码结果，
+ *  打开名片预览不再每次都解码+重编码，几乎秒出 */
+object AvatarPng {
+    private var key: String? = null
+    private var uri: String? = null
+    fun get(path: String?): String? {
+        if (path == null) return null
+        val f = java.io.File(path)
+        if (!f.exists()) return null
+        val k = path + ":" + f.lastModified()
+        if (k == key) return uri
+        val v = runCatching {
+            val bmp = android.graphics.BitmapFactory.decodeFile(f.absolutePath) ?: return null
+            val out = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+            "data:image/png;base64," + android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+        }.getOrNull() ?: return null
+        key = k; uri = v
+        return v
+    }
+}
 
 /** 卡片预览 WebView(名片弹窗/卡片弹窗共用)：加载整页 HTML，链接走 APP 内置浏览器 */
 @Composable
