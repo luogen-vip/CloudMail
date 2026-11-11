@@ -1357,16 +1357,26 @@ fun CardPreviewWebView(nav: NavHostController, pageHtml: String, h: androidx.com
             settings.javaScriptEnabled = false
             settings.allowFileAccess = true
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            alpha = 0f
             webViewClient = object : android.webkit.WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: android.webkit.WebView, u: String): Boolean {
                     return if (u.startsWith("http://") || u.startsWith("https://")) {
                         nav.navigate("browser/" + android.net.Uri.encode(u)); true
                     } else false
                 }
+                // 渲染完成(含头像等资源加载完)后整页淡入：之前渐进绘制，头像先露上半部分再闪下半部分
+                override fun onPageFinished(view: android.webkit.WebView, url: String) {
+                    view.post { view.animate().alpha(1f).setDuration(80).start() }
+                }
             }
         }
     }, update = { wv ->
-        wv.loadDataWithBaseURL(baseUrl, pageHtml, "text/html", "utf-8", null)
+        // 内容没变不重载：之前每次重组都重新 load，头像反复“上半身→下半身”闪现
+        if (wv.tag != pageHtml) {
+            wv.tag = pageHtml
+            wv.alpha = 0f
+            wv.loadDataWithBaseURL(baseUrl, pageHtml, "text/html", "utf-8", null)
+        }
     }, modifier = Modifier.fillMaxWidth().height(h))
 }
 
