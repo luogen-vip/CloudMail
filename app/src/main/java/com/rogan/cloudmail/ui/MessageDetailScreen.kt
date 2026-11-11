@@ -12,6 +12,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -82,17 +83,14 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
-                // maxLines=1：已发送邮件顶栏图标多，标题“邮件详情”被挤压换行时
-                // 会在置顶按钮左边竖着露出“件详”两个字，现在单行省略不再变形
-                title = { Text("邮件详情", fontSize = 17.sp, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, softWrap = false) },
-                navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } },
-                actions = {
+                // 标题位换成 置顶+分享 两个图标(与返回箭头留足间距不误触)：
+                // 之前置顶文字按钮紧贴返回箭头，点返回常误触置顶；␣⋮ 折叠菜单里的置顶/分享也提到明面上，
+                // 不用再展开菜单；标题「邮件详情」从正文头部已能看出，这里不再重复占位
+                title = {
                     if (m != null) {
-                        // 置顶/取消置顶：普通邮件用文字按钮；已发送邮件顶栏动作多，文字按钮会和返回箭头
-                        // 挤在一起(点返回误触置顶)，收进下方 ⋮ 菜单里，顶栏只留 星标/回复/⋮/删除
-                        if (m.folder != "SENT") {
-                            TextButton(onClick = {
+                        androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(start = 14.dp)) {
+                            IconButton(onClick = {
                                 scope.launch {
                                     val nv = if (m.pinnedAt > 0) 0L else System.currentTimeMillis()
                                     db.messages().setPinned(m.id, nv)
@@ -100,14 +98,23 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                                     m0 = m0?.copy(pinnedAt = nv)
                                     toast = if (nv > 0) "已置顶，会显示在列表最上面" else "已取消置顶"
                                 }
-                            }, contentPadding = PaddingValues(horizontal = 4.dp)) {
-                                Text(if (m.pinnedAt > 0) "取消置顶" else "置顶", fontSize = 12.sp,
-                                    color = if (m.pinnedAt > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                            }, modifier = Modifier.size(40.dp)) {
+                                Icon(Icons.Default.PushPin, if (m.pinnedAt > 0) "取消置顶" else "置顶",
+                                    tint = if (m.pinnedAt > 0) MaterialTheme.colorScheme.primary
+                                           else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = if (m.pinnedAt > 0) Modifier else Modifier.rotate(45f))
+                            }
+                            IconButton(onClick = { showShare = true }, modifier = Modifier.size(40.dp)) {
+                                Icon(Icons.Default.Share, "分享/导出")
                             }
                         }
-                        if (m.folder != "SENT") {
-                            IconButton(onClick = { showShare = true }) { Icon(Icons.Default.Share, "分享/导出") }
-                        }
+                    } else {
+                        Text("邮件详情", fontSize = 17.sp)
+                    }
+                },
+                navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.Default.ArrowBack, "返回") } },
+                actions = {
+                    if (m != null) {
                         IconButton(onClick = {
                             if (starBusy) return@IconButton
                             starBusy = true
@@ -130,31 +137,17 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                             IconButton(onClick = { nav.navigate("forward/${m.id}") }) { Icon(Icons.Default.Shortcut, "转发") }
                         }
                         if (m.folder == "SENT") {
-                            // 已发送邮件顶栏动作多(8 个图标)，之前置顶图标被挤变形、返回箭头被挡；
-                            // 现在顶栏只保留 置顶/分享/星标/回复/删除/⋮，转发收进 ⋮ 菜单，图标不再被挤压
+                            // 已发送邮件：置顶/分享已提到标题位(不与返回箭头紧挨)，⋮ 只留 再次编辑/撤回/转发
                             var sentMenu by remember { mutableStateOf(false) }
                             IconButton(onClick = { sentMenu = true }) { Icon(Icons.Default.MoreVert, "更多操作") }
                             androidx.compose.material3.DropdownMenu(expanded = sentMenu,
                                 onDismissRequest = { sentMenu = false }) {
-                                androidx.compose.material3.DropdownMenuItem(text = { Text(if (m.pinnedAt > 0) "取消置顶" else "置顶") },
-                                    onClick = {
-                                        sentMenu = false
-                                        scope.launch {
-                                            val nv = if (m.pinnedAt > 0) 0L else System.currentTimeMillis()
-                                            db.messages().setPinned(m.id, nv)
-                                            msg = m.copy(pinnedAt = nv)
-                                            m0 = m0?.copy(pinnedAt = nv)
-                                            toast = if (nv > 0) "已置顶，会显示在列表最上面" else "已取消置顶"
-                                        }
-                                    })
                                 androidx.compose.material3.DropdownMenuItem(text = { Text("✎ 再次编辑") },
                                     onClick = { sentMenu = false; nav.navigate("reedit/${m.id}") })
                                 androidx.compose.material3.DropdownMenuItem(text = { Text("↩ 撤回") },
                                     onClick = { sentMenu = false; confirmRecall = true })
                                 androidx.compose.material3.DropdownMenuItem(text = { Text("➦ 转发") },
                                     onClick = { sentMenu = false; nav.navigate("forward/${m.id}") })
-                                androidx.compose.material3.DropdownMenuItem(text = { Text("⤴ 分享/导出") },
-                                    onClick = { sentMenu = false; showShare = true })
                             }
                         }
                         IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Default.Delete, "删除") }
@@ -595,6 +588,9 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
             }
             val maxD = when (rmo) { 1, 3, 5, 7, 8, 10, 12 -> 31; 4, 6, 9, 11 -> 30; else -> 29 }
             val dateBad = rdy > maxD
+            // 错误提示显示在弹窗内部：之前用 Snackbar，被弹窗盖住看不见，用户以为点了没反应
+            var remindErr by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(ry, rmo, rdy, rh, rmi) { remindErr = null }
             AlertDialog(onDismissRequest = { showRemind = false },
                 title = { Text("稍后提醒") },
                 text = {
@@ -656,14 +652,18 @@ fun MessageDetailScreen(nav: NavHostController, id: Long) {
                         com.rogan.cloudmail.ui.Stepper("小时", rh, 0, 23) { rh = it }
                         com.rogan.cloudmail.ui.Stepper("分钟", rmi, 0, 59) { rmi = it }
                         Text("将提醒：${fmtFull(target)}", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        remindErr?.let {
+                            Spacer(Modifier.height(6.dp))
+                            Text("⚠ $it", fontSize = 13.sp, color = Color(0xFFD32F2F), fontWeight = FontWeight.Bold)
+                        }
                     }
                 },
                 // 确认按钮固定在弹窗底栏(不再藏在滚动区最下面)：打开弹窗一眼就能看到「按这个时间提醒」
                 confirmButton = {
                     TextButton(onClick = {
                         when {
-                            dateBad -> toast = "$rmo 月没有 $rdy 日，请修改日期"
-                            target <= System.currentTimeMillis() -> toast = "所选时间已经过去了，请往后调"
+                            dateBad -> remindErr = "${rmo} 月没有 ${rdy} 日，请修改日期"
+                            target <= System.currentTimeMillis() -> remindErr = "所选时间早于现在(${fmtFull(System.currentTimeMillis())})，请把时间往后调"
                             else -> {
                                 com.rogan.cloudmail.mail.ReminderWorker.schedule(ctx, m.id, target)
                                 hasReminder = true
