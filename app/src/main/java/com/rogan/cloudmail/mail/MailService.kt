@@ -546,12 +546,15 @@ object MailService {
                     key.startsWith("TITLE") && title.isBlank() -> title = value
                     key.startsWith("ADR") && adr.isBlank() -> adr = value.split(';').filter { it.isNotBlank() }.joinToString(" ")
                     key.startsWith("PHOTO") && photo.isBlank() -> {
-                        photo = when {
+                        val raw = when {
                             value.startsWith("http") -> value
                             key.contains("BASE64") || value.length > 100 -> "data:image/jpeg;base64," + value.replace(" ", "")
                             else -> ""
                         }
-                        if (photo.length > 600_000) photo = ""  // 过大不内嵌，避免 WebView 卡顿
+                        // base64 头像统一重编码为 PNG data URI：PNG 一次性解码，头像和卡片同一帧完整出现；
+                        // 直接内嵌 JPEG(尤其渐进式)会先画出上半部分再补下半部分
+                        photo = raw.takeIf { it.startsWith("data:image") }?.let { reencodeAsPng(it) } ?: raw
+                        if (photo.length > 900_000) photo = ""  // 过大不内嵌，避免 WebView 卡顿
                     }
                 }
             }
@@ -568,6 +571,18 @@ object MailService {
             "</div>"
         }.getOrDefault("")
     }
+
+    /** 把 data:image/...;base64 头像重编码为 PNG data URI：PNG 一次性解码，
+     *  避免 WebView 渐进绘制导致头像先显示上半部分再闪下半部分。失败返回 null(用原图) */
+    private fun reencodeAsPng(dataUri: String): String? = runCatching {
+        val b64 = dataUri.substringAfter("base64,", "")
+        if (b64.isEmpty()) return null
+        val bmp = android.graphics.BitmapFactory.decodeByteArray(
+            android.util.Base64.decode(b64, android.util.Base64.NO_WRAP), 0, 0) ?: return null
+        val out = java.io.ByteArrayOutputStream()
+        bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+        "data:image/png;base64," + android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+    }.getOrNull()
 
     private fun collectAttachment(ctx: Context, p: Part, msgId: Long, atts: MutableList<AttInfo>) {
         runCatching {
