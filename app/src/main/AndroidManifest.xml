@@ -19,8 +19,9 @@
         android:allowBackup="true"
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
-        android:resizeableActivity="false"
         android:theme="@style/Theme.CloudMail">
+        <!-- 不声明 resizeableActivity=false：那会连系统的右上角滑动小窗(自由窗口)一起禁掉。
+             系统清后台后重开变成屏幕中间小窗的问题，改由 MainActivity 冷启动自愈兜底 -->
 
         <activity
             android:name=".MainActivity"
