@@ -34,8 +34,8 @@ android {
         applicationId = "com.rogan.cloudmail"
         minSdk = 26
         targetSdk = 34
-        versionCode = 36
-        versionName = "1.3.32"
+        versionCode = 37
+        versionName = "1.3.33"
     }
 
     buildTypes {
