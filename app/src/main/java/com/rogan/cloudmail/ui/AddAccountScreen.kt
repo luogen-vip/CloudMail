@@ -456,7 +456,12 @@ fun EditAccountScreen(nav: NavHostController, id: Long) {
                 scope.launch(Dispatchers.IO) {
                     db.messages().deleteByAccount(id)
                     db.accounts().delete(id)
-                    withContext(Dispatchers.Main) { nav.popBackStack() }
+                    withContext(Dispatchers.Main) {
+                        // 回到首页后自动切到「全部邮件」：否则背景还停在删除前的
+                        // 草稿箱/分类页，看起来像残留旧数据
+                        FolderBridge.pendingFolder = "all"
+                        nav.popBackStack()
+                    }
                 }
             }) { Text("删除此邮箱账号(同时清理本地邮件)", color = Color(0xFFEF6C00)) }
             toast?.let { Text(it, color = Color(0xFFEF6C00), fontSize = 13.sp) }
