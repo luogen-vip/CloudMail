@@ -613,7 +613,9 @@ fun ComposeScreen(nav: NavHostController, draftId: Long, presetTo: String, forwa
     Scaffold(
         snackbarHost = {
             LaunchedEffect(toast) {
-                if (toast != null) { delay(1500); toast = null }
+                // 成功类提示(录音/附件/图片已添加)0.7 秒刚好能看见又不拖沓，之前 1.5 秒太久；
+                // 失败/错误类仍保留 1.5 秒，太短会来不及看清原因
+                if (toast != null) { delay(if (toast!!.endsWith("已添加)") || toast!!.endsWith("已添加")) 700L else 1500L); toast = null }
             }
             toast?.let { t ->
                 Surface(shape = RoundedCornerShape(20.dp), color = Color(0xE6323232),
