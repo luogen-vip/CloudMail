@@ -1375,9 +1375,12 @@ object AvatarPng {
     }
 }
 
-/** 卡片预览 WebView(名片弹窗/卡片弹窗共用)：加载整页 HTML，链接走 APP 内置浏览器 */
+/** 卡片预览 WebView(名片弹窗/卡片弹窗共用)：加载整页 HTML，链接走 APP 内置浏览器。
+ *  高度跟随网页内容自适应：内容多高 WebView 就撑多高，整块交给外层滚动容器滚动。
+ *  之前固定高度，卡片文字一多下半部分被裁掉，WebView 内部想滚手势又被外层抢走 → 滑不动 */
 @Composable
 fun CardPreviewWebView(nav: NavHostController, pageHtml: String, h: androidx.compose.ui.unit.Dp, baseUrl: String? = null) {
+    var contentH by remember { mutableStateOf(h) }
     AndroidView(factory = { vctx ->
         android.webkit.WebView(vctx).apply {
             settings.javaScriptEnabled = false
@@ -1392,7 +1395,17 @@ fun CardPreviewWebView(nav: NavHostController, pageHtml: String, h: androidx.com
                 }
                 // 渲染完成(含头像等资源加载完)后整页淡入：之前渐进绘制，头像先露上半部分再闪下半部分
                 override fun onPageFinished(view: android.webkit.WebView, url: String) {
-                    view.post { view.animate().alpha(1f).setDuration(80).start() }
+                    view.post {
+                        view.animate().alpha(1f).setDuration(80).start()
+                        // 按实际内容高度撑开(scale 换算成 dp)，最小不低于调用方给定值，上限 2400dp 防异常值
+                        runCatching {
+                            if (view.contentHeight > 0) {
+                                val d = view.resources.displayMetrics.density
+                                contentH = (view.contentHeight * view.scale / d)
+                                    .dp.coerceAtLeast(h).coerceAtMost(2400.dp)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1401,9 +1414,10 @@ fun CardPreviewWebView(nav: NavHostController, pageHtml: String, h: androidx.com
         if (wv.tag != pageHtml) {
             wv.tag = pageHtml
             wv.alpha = 0f
+            contentH = h  // 换内容时先回最小高度，等新页面量完再撑开
             wv.loadDataWithBaseURL(baseUrl, pageHtml, "text/html", "utf-8", null)
         }
-    }, modifier = Modifier.fillMaxWidth().height(h))
+    }, modifier = Modifier.fillMaxWidth().height(contentH))
 }
 
 fun fontLabel(f: String) = when (f) {
