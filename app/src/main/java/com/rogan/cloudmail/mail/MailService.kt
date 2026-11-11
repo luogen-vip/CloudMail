@@ -485,34 +485,88 @@ object MailService {
                 val mp = part.content as javax.mail.Multipart
                 // 优先找 multipart/alternative 中的 html
                 var htmlFallback = ""
+                var vcardHtml = ""
                 for (i in 0 until mp.count) {
                     val p = mp.getBodyPart(i)
-                    if (p.isMimeType("multipart/alternative")) return extractBody(ctx, p, msgId, atts)
+                    if (p.isMimeType("multipart/alternative")) return extractBody(ctx, p, msgId, atts) + vcardHtml
                     if (p.isMimeType("text/html")) { htmlFallback = p.content.toString() }
                     else if (p.isMimeType("text/plain") && htmlFallback.isEmpty()) { /* 继续找 html */ }
-                    else if (p.isMimeType("multipart/*")) return extractBody(ctx, p, msgId, atts)
+                    else if (p.isMimeType("multipart/*")) return extractBody(ctx, p, msgId, atts) + vcardHtml
+                    else if (p.isMimeType("text/vcard") || p.isMimeType("text/x-vcard")) {
+                        // 别人发来的 vCard 名片(.vcf)：正文里渲染成完整资料卡(含头像)，同时保留为附件
+                        vcardHtml += runCatching { vcardToHtml(p.content.toString()) }.getOrDefault("")
+                        collectAttachment(ctx, p, msgId, atts)
+                    }
                     else collectAttachment(ctx, p, msgId, atts)
                 }
-                if (htmlFallback.isNotEmpty()) return htmlFallback
+                if (htmlFallback.isNotEmpty()) return htmlFallback + vcardHtml
                 // 全是纯文本
                 for (i in 0 until mp.count) {
                     val p = mp.getBodyPart(i)
                     if (p.isMimeType("text/plain")) {
                         val t = p.content.toString()
-                        return "<pre style=\"white-space:pre-wrap;font-family:sans-serif\">${esc(t)}</pre>"
+                        return "<pre style=\"white-space:pre-wrap;font-family:sans-serif\">${esc(t)}</pre>" + vcardHtml
                     }
                 }
-                htmlFallback
+                htmlFallback + vcardHtml
             } else if (part.isMimeType("text/html")) {
                 part.content.toString()
             } else if (part.isMimeType("text/plain")) {
                 val t = part.content.toString()
                 "<pre style=\"white-space:pre-wrap;font-family:sans-serif\">${esc(t)}</pre>"
+            } else if (part.isMimeType("text/vcard") || part.isMimeType("text/x-vcard")) {
+                val h = runCatching { vcardToHtml(part.content.toString()) }.getOrDefault("")
+                collectAttachment(ctx, part, msgId, atts)
+                h
             } else {
                 collectAttachment(ctx, part, msgId, atts)
                 ""
             }
         } catch (e: Exception) { "" }
+    }
+
+    /** 解析他人发来的 vCard(.vcf) 名片：渲染成资料卡(头像/姓名/电话/邮箱/单位/地址)，
+     *  之前只当附件列出，正文里看不到名片信息和头像 */
+    fun vcardToHtml(vcf: String): String {
+        return runCatching {
+            // 折行合并(vCard 规范：换行后以空格开头的是续行)
+            val unfolded = vcf.replace(Regex("\r?\n[ \t]"), "")
+            var name = ""; var phone = ""; var email = ""; var org = ""; var title = ""; var adr = ""; var photo = ""
+            for (line in unfolded.lines()) {
+                val idx = line.indexOf(':')
+                if (idx <= 0) continue
+                val key = line.substring(0, idx).uppercase()
+                val value = line.substring(idx + 1)
+                when {
+                    key == "FN" && name.isBlank() -> name = value
+                    key == "N" && name.isBlank() -> name = value.split(';').filter { it.isNotBlank() }.joinToString(" ")
+                    key.startsWith("TEL") && phone.isBlank() -> phone = value
+                    key.startsWith("EMAIL") && email.isBlank() -> email = value
+                    key.startsWith("ORG") && org.isBlank() -> org = value.replace(';', ' ')
+                    key.startsWith("TITLE") && title.isBlank() -> title = value
+                    key.startsWith("ADR") && adr.isBlank() -> adr = value.split(';').filter { it.isNotBlank() }.joinToString(" ")
+                    key.startsWith("PHOTO") && photo.isBlank() -> {
+                        photo = when {
+                            value.startsWith("http") -> value
+                            key.contains("BASE64") || value.length > 100 -> "data:image/jpeg;base64," + value.replace(" ", "")
+                            else -> ""
+                        }
+                        if (photo.length > 600_000) photo = ""  // 过大不内嵌，避免 WebView 卡顿
+                    }
+                }
+            }
+            val avatar = if (photo.isNotBlank())
+                "<img src=\"$photo\" style=\"width:52px;height:52px;border-radius:50%;object-fit:cover\"/>"
+            else
+                "<div style=\"width:52px;height:52px;border-radius:50%;background:#3F7BF6;color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;flex:none\">${esc(name.firstOrNull()?.toString() ?: "?")}</div>"
+            fun row(label: String, v: String): String =
+                if (v.isBlank()) "" else "<div style=\"font-size:12px;color:#555;margin-top:2px\"><b style=\"color:#333\">$label</b> ${esc(v)}</div>"
+            "<div style=\"border:1px solid #e0e0e0;border-radius:12px;padding:12px;margin:8px 0\">" +
+                "<div style=\"display:flex;align-items:center;gap:12px\">" + avatar +
+                "<div style=\"font-size:15px;font-weight:bold\">" + esc(name.ifBlank { "名片" }) + "</div></div>" +
+                row("电话", phone) + row("邮箱", email) + row("单位", org) + row("职务", title) + row("地址", adr) +
+            "</div>"
+        }.getOrDefault("")
     }
 
     private fun collectAttachment(ctx: Context, p: Part, msgId: Long, atts: MutableList<AttInfo>) {
